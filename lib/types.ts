@@ -126,7 +126,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
     providerLabel: "共有プロキシ（設定不要）",
     baseUrl: "",
     apiKey: "",
-    model: "llama-3.1-8b-instant",
+    model: "openai/gpt-oss-20b",
   },
   billing: {
     licenseCode: "",
