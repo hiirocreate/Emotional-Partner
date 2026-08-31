@@ -32,7 +32,15 @@ import {
 } from "../lib/billing";
 import { clearHistory, loadSettings, saveSettings } from "../lib/storage";
 import { AiConnectionMode, AppSettings, PersonaPresetId, TtsProviderId, VoiceOption } from "../lib/types";
-import { listAvailableVoices, listVoicevoxSpeakers, speakText } from "../lib/voiceOutput";
+import {
+  listAvailableVoices,
+  listGoogleTtsVoices,
+  listVoicevoxSpeakers,
+  speakText,
+} from "../lib/voiceOutput";
+
+const GOOGLE_TTS_SETUP_URL =
+  "https://console.cloud.google.com/apis/library/texttospeech.googleapis.com";
 
 // 共有プロキシ経由で選べるモデル(proxy-worker側のALLOWED_MODELSと合わせること)
 const PROXY_MODEL_PRESETS = [
@@ -116,6 +124,10 @@ export default function SettingsScreen() {
   const [voicevoxUrlDraft, setVoicevoxUrlDraft] = useState("");
   const [voicevoxLoading, setVoicevoxLoading] = useState(false);
   const [voicevoxError, setVoicevoxError] = useState<string | null>(null);
+  const [googleVoices, setGoogleVoices] = useState<VoiceOption[]>([]);
+  const [googleApiKeyDraft, setGoogleApiKeyDraft] = useState("");
+  const [googleLoading, setGoogleLoading] = useState(false);
+  const [googleError, setGoogleError] = useState<string | null>(null);
   const [customPersonaText, setCustomPersonaText] = useState("");
   const [openRouterConnecting, setOpenRouterConnecting] = useState(false);
   const [licenseCodeDraft, setLicenseCodeDraft] = useState("");
@@ -142,11 +154,15 @@ export default function SettingsScreen() {
       setSettings(s);
       setCustomPersonaText(s.persona.customDescription);
       setVoicevoxUrlDraft(s.voice.voicevox.baseUrl);
+      setGoogleApiKeyDraft(s.voice.google.apiKey);
       setLicenseCodeDraft(s.billing.licenseCode);
       const v = await listAvailableVoices();
       setSystemVoices(v);
       if (s.voice.voicevox.baseUrl) {
         fetchVoicevoxSpeakers(s.voice.voicevox.baseUrl, false);
+      }
+      if (s.voice.google.apiKey) {
+        fetchGoogleVoices(s.voice.google.apiKey, false);
       }
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -222,6 +238,51 @@ export default function SettingsScreen() {
     } finally {
       setVoicevoxLoading(false);
     }
+  };
+
+  const onSelectGoogleVoice = (id: string) => {
+    persist({
+      ...settings,
+      voice: { ...settings.voice, google: { ...settings.voice.google, voiceName: id } },
+    });
+  };
+
+  const fetchGoogleVoices = async (apiKey: string, persistKey: boolean) => {
+    if (!apiKey.trim()) return;
+    setGoogleLoading(true);
+    setGoogleError(null);
+    try {
+      const voices = await listGoogleTtsVoices(apiKey);
+      setGoogleVoices(voices);
+      if (persistKey) {
+        await persist({
+          ...settings,
+          voice: { ...settings.voice, google: { ...settings.voice.google, apiKey } },
+        });
+      }
+    } catch (e) {
+      setGoogleError(
+        e instanceof Error
+          ? e.message
+          : "Google Cloud TTSに接続できませんでした。APIキーを確認してください。"
+      );
+      setGoogleVoices([]);
+    } finally {
+      setGoogleLoading(false);
+    }
+  };
+
+  const handlePasteGoogleApiKey = async () => {
+    const text = await Clipboard.getStringAsync();
+    if (!text.trim()) {
+      showAlert("クリップボードが空です", "先にAPIキーをコピーしてから、もう一度お試しください。");
+      return;
+    }
+    setGoogleApiKeyDraft(text.trim());
+  };
+
+  const handleOpenGoogleTtsSetupPage = () => {
+    Linking.openURL(GOOGLE_TTS_SETUP_URL);
   };
 
   const onToggleAutoSpeak = (value: boolean) => {
@@ -428,6 +489,8 @@ export default function SettingsScreen() {
           "再生できませんでした",
           settings.voice.provider === "voicevox"
             ? "VOICEVOXエンジンへの接続、または話者選択を確認してください。"
+            : settings.voice.provider === "google"
+            ? "Google Cloud TTSのAPIキー、または音声選択を確認してください。"
             : "この端末で利用できる音声が見つかりませんでした。"
         ),
     });
@@ -441,12 +504,19 @@ export default function SettingsScreen() {
     showConfirm("会話履歴を削除しますか？", "この操作は取り消せません。", "削除する", doClear, true);
   };
 
-  const activeVoiceList = settings.voice.provider === "voicevox" ? voicevoxSpeakers : systemVoices;
+  const activeVoiceList =
+    settings.voice.provider === "voicevox"
+      ? voicevoxSpeakers
+      : settings.voice.provider === "google"
+      ? googleVoices
+      : systemVoices;
   const activeSelectedId =
     settings.voice.provider === "voicevox"
       ? settings.voice.voicevox.speakerId != null
         ? String(settings.voice.voicevox.speakerId)
         : null
+      : settings.voice.provider === "google"
+      ? settings.voice.google.voiceName
       : settings.voice.selectedVoiceId;
 
   return (
@@ -570,6 +640,19 @@ export default function SettingsScreen() {
               VOICEVOX（キャラクターボイス）
             </Text>
           </Pressable>
+          <Pressable
+            onPress={() => onSelectTtsProvider("google")}
+            style={[styles.chip, settings.voice.provider === "google" && styles.chipActive]}
+          >
+            <Text
+              style={[
+                styles.chipText,
+                settings.voice.provider === "google" && styles.chipTextActive,
+              ]}
+            >
+              Google Cloud TTS（自分のAPIキー）
+            </Text>
+          </Pressable>
         </View>
 
         {settings.voice.provider === "voicevox" ? (
@@ -607,15 +690,60 @@ export default function SettingsScreen() {
           </>
         ) : null}
 
+        {settings.voice.provider === "google" ? (
+          <>
+            <Text style={styles.smallHelper}>
+              サーバーのホスティングは不要です。ご自身のGoogle Cloudアカウントで発行したAPIキーを入力してください。無料枠が大きいため、個人利用なら通常は課金されません(手順はREADME参照)。APIキーはこの端末にのみ保存され、外部には送信されません。
+            </Text>
+            <Pressable style={styles.secondaryButton} onPress={handleOpenGoogleTtsSetupPage}>
+              <Text style={styles.secondaryButtonText}>🌐 Text-to-Speech APIを有効化する</Text>
+            </Pressable>
+            <Text style={styles.smallHelper}>
+              初めての場合はプロジェクト作成→API有効化→「認証情報」からAPIキーを作成、という順番になります。詳しい手順はREADMEをご覧ください。
+            </Text>
+
+            <View style={styles.row}>
+              <Text style={styles.label}>APIキー</Text>
+              <Pressable onPress={handlePasteGoogleApiKey}>
+                <Text style={styles.linkText}>📋 クリップボードから貼り付け</Text>
+              </Pressable>
+            </View>
+            <TextInput
+              style={styles.input}
+              value={googleApiKeyDraft}
+              onChangeText={setGoogleApiKeyDraft}
+              secureTextEntry
+              autoCapitalize="none"
+              placeholder="AIza... など"
+            />
+            <Pressable
+              style={styles.testButton}
+              onPress={() => fetchGoogleVoices(googleApiKeyDraft, true)}
+              disabled={googleLoading}
+            >
+              {googleLoading ? (
+                <ActivityIndicator size="small" color="#2F5BD9" />
+              ) : (
+                <Text style={styles.testButtonText}>接続して音声一覧を取得</Text>
+              )}
+            </Pressable>
+            {googleError ? <Text style={styles.errorHelper}>{googleError}</Text> : null}
+          </>
+        ) : null}
+
         <Text style={styles.label}>
           {settings.voice.provider === "voicevox"
             ? `話者（${activeVoiceList.length}種類）`
+            : settings.voice.provider === "google"
+            ? `音声（${activeVoiceList.length}種類から選択）`
             : `読み上げボイス（${activeVoiceList.length}種類から選択）`}
         </Text>
         {activeVoiceList.length === 0 ? (
           <Text style={styles.smallHelper}>
             {settings.voice.provider === "voicevox"
               ? "まだ話者を取得していません。上のURLを入力して「接続して話者一覧を取得」を押してください。"
+              : settings.voice.provider === "google"
+              ? "まだ音声を取得していません。上にAPIキーを入力して「接続して音声一覧を取得」を押してください。"
               : "利用可能な音声を検出できませんでした。端末/ブラウザの音声合成設定をご確認ください。"}
           </Text>
         ) : (
@@ -626,6 +754,8 @@ export default function SettingsScreen() {
                 onPress={() =>
                   settings.voice.provider === "voicevox"
                     ? onSelectVoicevoxSpeaker(v.id)
+                    : settings.voice.provider === "google"
+                    ? onSelectGoogleVoice(v.id)
                     : onSelectSystemVoice(v.id)
                 }
                 style={[styles.chip, activeSelectedId === v.id && styles.chipActive]}
