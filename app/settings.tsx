@@ -15,6 +15,7 @@ import {
 import { useRouter } from "expo-router";
 import * as Clipboard from "expo-clipboard";
 
+import { ColorSwatchPicker } from "../components/ColorSwatchPicker";
 import { PERSONA_PRESETS } from "../lib/personas";
 import {
   isBillingConfigured,
@@ -32,9 +33,11 @@ import {
 } from "../lib/billing";
 import { clearHistory, loadSettings, saveSettings } from "../lib/storage";
 import {
+  BASE_COLOR_SWATCHES,
+  BUTTON_COLOR_SWATCHES,
   DEFAULT_THEME_COLORS,
-  isValidHexColor,
   resolveThemeColors,
+  TEXT_COLOR_SWATCHES,
   THEME_PRESET_LIST,
 } from "../lib/theme";
 import {
@@ -516,24 +519,14 @@ export default function SettingsScreen() {
     persist({ ...settings, theme: { presetId: id, customColors: null } });
   };
 
-  const onChangeCustomColor = (field: keyof CustomThemeColors, value: string) => {
-    setCustomColorDraft((d) => ({ ...d, [field]: value }));
-  };
-
-  const handleSaveCustomTheme = () => {
-    const draft = customColorDraft;
-    if (
-      !isValidHexColor(draft.baseColor) ||
-      !isValidHexColor(draft.buttonColor) ||
-      !isValidHexColor(draft.textColor)
-    ) {
-      showAlert(
-        "色の形式が正しくありません",
-        "#RRGGBB または #RGB の形式で入力してください(例: #4A7DFF)。"
-      );
-      return;
-    }
-    persist({ ...settings, theme: { ...settings.theme, customColors: { ...draft } } });
+  // カラーコードの手入力ではなく、色見本をタップした瞬間に確定・保存する
+  const onPickCustomColor = (field: keyof CustomThemeColors, hex: string) => {
+    const next: CustomThemeColors = {
+      ...(settings.theme.customColors ?? DEFAULT_THEME_COLORS),
+      [field]: hex,
+    };
+    setCustomColorDraft(next);
+    persist({ ...settings, theme: { ...settings.theme, customColors: next } });
   };
 
   const handleResetCustomTheme = () => {
@@ -925,8 +918,28 @@ export default function SettingsScreen() {
         {isAdmin ? (
           <>
             <Text style={styles.helper}>
-              管理者は配色を自由に指定できます(ベースカラー・ボタンカラー・テキストカラー)。ここで設定した配色は、サブスクの方が選ぶプリセットより優先されます。
+              管理者は配色を自由に指定できます。色見本をタップするとすぐに反映されます(カラーコードの入力は不要です)。ここで設定した配色は、サブスクの方が選ぶプリセットより優先されます。
             </Text>
+
+            <Text style={styles.label}>ベースカラー</Text>
+            <ColorSwatchPicker
+              value={customColorDraft.baseColor}
+              onChange={(hex) => onPickCustomColor("baseColor", hex)}
+              swatches={BASE_COLOR_SWATCHES}
+            />
+            <Text style={[styles.label, { marginTop: 14 }]}>ボタンカラー</Text>
+            <ColorSwatchPicker
+              value={customColorDraft.buttonColor}
+              onChange={(hex) => onPickCustomColor("buttonColor", hex)}
+              swatches={BUTTON_COLOR_SWATCHES}
+            />
+            <Text style={[styles.label, { marginTop: 14 }]}>テキストカラー</Text>
+            <ColorSwatchPicker
+              value={customColorDraft.textColor}
+              onChange={(hex) => onPickCustomColor("textColor", hex)}
+              swatches={TEXT_COLOR_SWATCHES}
+            />
+
             <View style={styles.themePreviewRow}>
               <View style={[styles.themeSwatch, { backgroundColor: themeColors.baseColor }]} />
               <View style={[styles.themeSwatch, { backgroundColor: themeColors.buttonColor }]} />
@@ -934,39 +947,6 @@ export default function SettingsScreen() {
               <Text style={styles.smallHelper}>← 現在の配色(ベース/ボタン/テキスト)</Text>
             </View>
 
-            <Text style={styles.label}>ベースカラー</Text>
-            <TextInput
-              style={styles.input}
-              value={customColorDraft.baseColor}
-              onChangeText={(v) => onChangeCustomColor("baseColor", v)}
-              autoCapitalize="none"
-              placeholder="#FFFFFF"
-            />
-            <Text style={styles.label}>ボタンカラー</Text>
-            <TextInput
-              style={styles.input}
-              value={customColorDraft.buttonColor}
-              onChangeText={(v) => onChangeCustomColor("buttonColor", v)}
-              autoCapitalize="none"
-              placeholder="#4A7DFF"
-            />
-            <Text style={styles.label}>テキストカラー</Text>
-            <TextInput
-              style={styles.input}
-              value={customColorDraft.textColor}
-              onChangeText={(v) => onChangeCustomColor("textColor", v)}
-              autoCapitalize="none"
-              placeholder="#26263A"
-            />
-
-            <View style={styles.chipWrap}>
-              <Pressable
-                style={[styles.primaryButton, { backgroundColor: themeColors.buttonColor }]}
-                onPress={handleSaveCustomTheme}
-              >
-                <Text style={styles.primaryButtonText}>この配色を保存</Text>
-              </Pressable>
-            </View>
             {settings.theme.customColors ? (
               <Pressable onPress={handleResetCustomTheme}>
                 <Text style={styles.linkText}>自由設定をやめてプリセットに戻す</Text>
