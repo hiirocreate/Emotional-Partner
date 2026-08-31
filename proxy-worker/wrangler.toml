@@ -1,0 +1,15 @@
+name = "kokorotalk-proxy"
+main = "src/index.js"
+compatibility_date = "2026-08-01"
+
+# 簡易レート制限(IPごとに60秒あたり20リクエストまで)。
+# Cloudflareのプランによってはこのバインディングが使えない場合があります。
+# その場合はこのブロックを削除してデプロイしてください(レート制限なしで動作します。
+# X-App-Secretによる簡易ゲートは有効なままです)。
+[[ratelimits]]
+name = "RATE_LIMITER"
+namespace_id = "1001"
+
+  [ratelimits.simple]
+  limit = 20
+  period = 60

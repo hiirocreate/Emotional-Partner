@@ -1,0 +1,3 @@
+{$DUCKDNS_DOMAIN} {
+	reverse_proxy voicevox:50021
+}

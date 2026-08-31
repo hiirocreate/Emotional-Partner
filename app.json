@@ -1,0 +1,55 @@
+{
+  "expo": {
+    "name": "こころトーク",
+    "slug": "kokoro-talk",
+    "scheme": "kokorotalk",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "light",
+    "newArchEnabled": true,
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.example.kokorotalk",
+      "infoPlist": {
+        "NSMicrophoneUsageDescription": "音声で相談するためにマイクを使用します。",
+        "NSSpeechRecognitionUsageDescription": "話した内容をテキストに変換するために使用します。"
+      }
+    },
+    "android": {
+      "package": "com.example.kokorotalk",
+      "adaptiveIcon": {
+        "backgroundColor": "#EAF3FF",
+        "foregroundImage": "./assets/android-icon-foreground.png",
+        "backgroundImage": "./assets/android-icon-background.png",
+        "monochromeImage": "./assets/android-icon-monochrome.png"
+      },
+      "predictiveBackGestureEnabled": false,
+      "permissions": [
+        "RECORD_AUDIO"
+      ]
+    },
+    "web": {
+      "favicon": "./assets/favicon.png",
+      "bundler": "metro",
+      "output": "static"
+    },
+    "plugins": [
+      "expo-router",
+      [
+        "expo-speech-recognition",
+        {
+          "microphonePermission": "音声で相談するためにマイクを使用します。",
+          "speechRecognitionPermission": "話した内容をテキストに変換するために使用します。",
+          "androidSpeechServicePackages": [
+            "com.google.android.googlequicksearchbox"
+          ]
+        }
+      ],
+      "expo-web-browser"
+    ],
+    "experiments": {
+      "typedRoutes": true
+    }
+  }
+}

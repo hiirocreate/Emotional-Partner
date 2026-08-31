@@ -1,0 +1,50 @@
+name: Build Android APK
+
+# main への push、または手動実行(Actionsタブから"Run workflow")でAPKをビルドします。
+# GitHub Actionsの無料枠(パブリックリポジトリは無料、プライベートも月2,000分無料)のみで完結します。
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+jobs:
+  build-apk:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Setup JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Install dependencies
+        run: npm ci --legacy-peer-deps
+
+      - name: Generate native Android project (expo prebuild)
+        run: npx expo prebuild --platform android --no-install
+
+      - name: Make gradlew executable
+        run: chmod +x android/gradlew
+
+      - name: Build release APK
+        # デフォルトのdebug署名を使うテスト用ビルドです。
+        # ストア配布用には別途リリース署名の設定が必要です。
+        run: |
+          cd android
+          ./gradlew assembleRelease --no-daemon
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: kokoro-talk-apk
+          path: android/app/build/outputs/apk/release/*.apk
+          retention-days: 14

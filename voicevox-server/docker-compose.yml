@@ -1,0 +1,34 @@
+# VOICEVOX ENGINE を常時稼働・HTTPS公開するための構成。
+# Caddy がドメイン(.env の DUCKDNS_DOMAIN)宛のリクエストを受け、
+# 自動でLet's Encrypt証明書を取得しつつ VOICEVOX ENGINE にプロキシする。
+# VOICEVOX自体は外部に直接公開しない(平文HTTPでの直接アクセスを防ぐため)。
+#
+# 使い方: README.md の「VOICEVOXを場所を問わず・スリープなしで使う」を参照。
+#   1. .env.example を .env にコピーし、DUCKDNS_DOMAIN を自分のドメインに書き換える
+#   2. docker compose up -d
+
+services:
+  voicevox:
+    image: voicevox/voicevox_engine:cpu-latest
+    restart: always
+    expose:
+      - "50021"
+
+  caddy:
+    image: caddy:2
+    restart: always
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      - DUCKDNS_DOMAIN=${DUCKDNS_DOMAIN}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - voicevox
+
+volumes:
+  caddy_data:
+  caddy_config:
