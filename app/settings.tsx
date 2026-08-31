@@ -16,7 +16,12 @@ import { useRouter } from "expo-router";
 import * as Clipboard from "expo-clipboard";
 
 import { PERSONA_PRESETS } from "../lib/personas";
-import { isBillingConfigured, isSharedProxyConfigured } from "../lib/config";
+import {
+  isBillingConfigured,
+  isSharedProxyConfigured,
+  isSharedVoicevoxConfigured,
+  SHARED_VOICEVOX_URL,
+} from "../lib/config";
 import { connectOpenRouterAccount } from "../lib/openrouterOAuth";
 import {
   BillingCheckError,
@@ -122,6 +127,16 @@ export default function SettingsScreen() {
       // この端末用のライセンスコードがまだ無ければ生成して保存しておく
       if (!s.billing.licenseCode) {
         s = { ...s, billing: { ...s.billing, licenseCode: generateLicenseCode() } };
+        await saveSettings(s);
+      }
+      // 有料プラン(または管理者)で、まだVOICEVOXの接続先を自分で設定していない場合は、
+      // 「備え付けのAI」と同じ考え方で、共有VOICEVOXサーバーへ自動的に接続する。
+      // (自分専用のVOICEVOXサーバーを使いたい人は、下のURL欄で個別に上書きできる)
+      if (!s.voice.voicevox.baseUrl && hasPaidAccess(s.billing) && isSharedVoicevoxConfigured()) {
+        s = {
+          ...s,
+          voice: { ...s.voice, voicevox: { ...s.voice.voicevox, baseUrl: SHARED_VOICEVOX_URL } },
+        };
         await saveSettings(s);
       }
       setSettings(s);
@@ -565,7 +580,9 @@ export default function SettingsScreen() {
               </Text>
             ) : null}
             <Text style={styles.smallHelper}>
-              無料・オープンソースのVOICEVOX ENGINEを自分でホスティングし、そのURLを入力してください。スリープなしで場所を問わず使うための推奨構成(Oracle Cloud常時無料VM + HTTPS化)はREADMEを参照してください。
+              {isSharedVoicevoxConfigured()
+                ? "有料プランの方(管理者含む)は、運営が用意した共有VOICEVOXサーバーに自動的に接続されます。自分専用のVOICEVOXサーバーを使いたい場合のみ、下のURLを書き換えてください。"
+                : "無料・オープンソースのVOICEVOX ENGINEを自分でホスティングし、そのURLを入力してください。スリープなしで場所を問わず使うための推奨構成(クラウドの無料VM + HTTPS化)はREADMEを参照してください。"}
             </Text>
             <Text style={styles.label}>VOICEVOX ENGINE の URL</Text>
             <TextInput
