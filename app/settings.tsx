@@ -858,7 +858,10 @@ export default function SettingsScreen() {
         </Pressable>
       </Section>
 
-      <Pressable style={styles.backButton} onPress={() => router.back()}>
+      <Pressable
+        style={styles.backButton}
+        onPress={() => (router.canGoBack() ? router.back() : router.replace("/"))}
+      >
         <Text style={styles.backButtonText}>チャットに戻る</Text>
       </Pressable>
     </ScrollView>
