@@ -69,6 +69,40 @@ const GROQ_MODELS_DOC_URL = "https://console.groq.com/docs/models";
 const GROQ_KEYS_URL = "https://console.groq.com/keys";
 const OPENROUTER_PRESET = CUSTOM_AI_PROVIDER_PRESETS[2]; // "OpenRouter (無料モデル)"
 
+/**
+ * Alert.alert はWeb版(react-native-web)では何も表示せず素通りしてしまうため、
+ * Web版では window.alert / window.confirm にフォールバックする。
+ * (ネイティブ版では従来どおり Alert.alert を使う)
+ */
+function showAlert(title: string, message?: string) {
+  if (Platform.OS === "web") {
+    if (typeof window !== "undefined" && typeof window.alert === "function") {
+      window.alert(message ? `${title}\n\n${message}` : title);
+    }
+    return;
+  }
+  Alert.alert(title, message);
+}
+
+function showConfirm(
+  title: string,
+  message: string,
+  confirmLabel: string,
+  onConfirm: () => void,
+  destructive = false
+) {
+  if (Platform.OS === "web") {
+    if (typeof window !== "undefined" && window.confirm(`${title}\n\n${message}`)) {
+      onConfirm();
+    }
+    return;
+  }
+  Alert.alert(title, message, [
+    { text: "キャンセル", style: "cancel" },
+    { text: confirmLabel, style: destructive ? "destructive" : "default", onPress: onConfirm },
+  ]);
+}
+
 export default function SettingsScreen() {
   const router = useRouter();
   const [settings, setSettings] = useState<AppSettings | null>(null);
@@ -127,7 +161,7 @@ export default function SettingsScreen() {
 
   const onSelectTtsProvider = (provider: TtsProviderId) => {
     if (provider === "voicevox" && !hasPaidAccess(settings.billing)) {
-      Alert.alert(
+      showAlert(
         "有料プランが必要です",
         "VOICEVOX(端末にない読み上げボイス)のご利用には、有料プランへの加入または管理者コードの入力が必要です。下の「利用プラン」欄からご確認ください。"
       );
@@ -191,7 +225,7 @@ export default function SettingsScreen() {
 
   const onSelectAiMode = (mode: AiConnectionMode) => {
     if (mode === "proxy" && settings.ai.mode !== "proxy" && !hasPaidAccess(settings.billing)) {
-      Alert.alert(
+      showAlert(
         "有料プランが必要です",
         "備え付けのAI(共有プロキシ)のご利用には、有料プランへの加入または管理者コードの入力が必要です。上の「利用プラン」欄からご確認いただくか、「自分のAPIキーを使う」をお使いください。"
       );
@@ -264,11 +298,11 @@ export default function SettingsScreen() {
             apiKey,
           },
         });
-        Alert.alert("接続しました", "OpenRouterのAPIキーを自動で設定しました。このまま会話を始められます。");
+        showAlert("接続しました", "OpenRouterのAPIキーを自動で設定しました。このまま会話を始められます。");
       }
       // apiKeyがnull(利用者がキャンセル)の場合は何もしない
     } catch (e) {
-      Alert.alert(
+      showAlert(
         "接続できませんでした",
         e instanceof Error ? e.message : "しばらくしてから再度お試しください。"
       );
@@ -284,7 +318,7 @@ export default function SettingsScreen() {
   const handlePasteApiKey = async () => {
     const text = await Clipboard.getStringAsync();
     if (!text.trim()) {
-      Alert.alert("クリップボードが空です", "先にAPIキーをコピーしてから、もう一度お試しください。");
+      showAlert("クリップボードが空です", "先にAPIキーをコピーしてから、もう一度お試しください。");
       return;
     }
     await persist({ ...settings, ai: { ...settings.ai, apiKey: text.trim() } });
@@ -320,17 +354,17 @@ export default function SettingsScreen() {
         },
       });
       if (result.status === "admin") {
-        Alert.alert("確認できました", "管理者として全機能をご利用いただけます。");
+        showAlert("確認できました", "管理者として全機能をご利用いただけます。");
       } else if (result.status === "active") {
-        Alert.alert("確認できました", "有料プランが有効です。備え付けのAI・VOICEVOXがご利用いただけます。");
+        showAlert("確認できました", "有料プランが有効です。備え付けのAI・VOICEVOXがご利用いただけます。");
       } else {
-        Alert.alert(
+        showAlert(
           "未加入です",
           "このコードでは有料プランが確認できませんでした。加入直後の場合は、反映まで数分かかることがあります。"
         );
       }
     } catch (e) {
-      Alert.alert(
+      showAlert(
         "確認できませんでした",
         e instanceof BillingCheckError ? e.message : "しばらくしてから再度お試しください。"
       );
@@ -341,7 +375,7 @@ export default function SettingsScreen() {
 
   const handleOpenSubscribePage = () => {
     if (!isBillingConfigured()) {
-      Alert.alert(
+      showAlert(
         "準備中です",
         "有料プランの決済ページがまだ設定されていません(アプリ配布者による設定待ちです)。"
       );
@@ -351,20 +385,15 @@ export default function SettingsScreen() {
   };
 
   const handleRegenerateLicenseCode = () => {
-    Alert.alert(
+    showConfirm(
       "新しいコードを発行しますか？",
       "現在のコードで既に加入済みの場合、再度この操作を行うと状態確認ができなくなることがあります。通常は操作不要です。",
-      [
-        { text: "キャンセル", style: "cancel" },
-        {
-          text: "発行する",
-          onPress: () => {
-            const next = generateLicenseCode();
-            setLicenseCodeDraft(next);
-            persist({ ...settings, billing: { licenseCode: next, status: "unknown", expiresAt: null, lastCheckedAt: null } });
-          },
-        },
-      ]
+      "発行する",
+      () => {
+        const next = generateLicenseCode();
+        setLicenseCodeDraft(next);
+        persist({ ...settings, billing: { licenseCode: next, status: "unknown", expiresAt: null, lastCheckedAt: null } });
+      }
     );
   };
 
@@ -380,7 +409,7 @@ export default function SettingsScreen() {
         : settings.voice;
     speakText("こんにちは。この声でお話しします。", voiceToUse, {
       onError: () =>
-        Alert.alert(
+        showAlert(
           "再生できませんでした",
           settings.voice.provider === "voicevox"
             ? "VOICEVOXエンジンへの接続、または話者選択を確認してください。"
@@ -392,16 +421,9 @@ export default function SettingsScreen() {
   const handleClearHistory = () => {
     const doClear = async () => {
       await clearHistory();
-      Alert.alert("削除しました", "会話履歴を削除しました。");
+      showAlert("削除しました", "会話履歴を削除しました。");
     };
-    if (Platform.OS === "web") {
-      doClear();
-    } else {
-      Alert.alert("会話履歴を削除しますか？", "この操作は取り消せません。", [
-        { text: "キャンセル", style: "cancel" },
-        { text: "削除する", style: "destructive", onPress: doClear },
-      ]);
-    }
+    showConfirm("会話履歴を削除しますか？", "この操作は取り消せません。", "削除する", doClear, true);
   };
 
   const activeVoiceList = settings.voice.provider === "voicevox" ? voicevoxSpeakers : systemVoices;
