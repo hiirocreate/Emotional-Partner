@@ -18,17 +18,29 @@ import { VoiceButton } from "../components/VoiceButton";
 import { streamAiReply, AiConfigError, AiRequestError } from "../lib/ai";
 import { hasPaidAccess } from "../lib/billing";
 import { loadHistory, loadSettings, saveHistory } from "../lib/storage";
+import { resolveThemeColors } from "../lib/theme";
 import { AppSettings, ChatMessage } from "../lib/types";
 import { useVoiceInput } from "../lib/voiceInput";
-import { speakText, stopSpeaking } from "../lib/voiceOutput";
+import { enqueueSpeech, extractSpeakableChunks, speakText, stopSpeaking } from "../lib/voiceOutput";
 
 /** VOICEVOXの利用にはサブスク(または管理者コード)が必要なため、権利がない場合は端末内蔵ボイスへ自動フォールバックする */
-function speakWithGate(text: string, settings: AppSettings, callbacks?: Parameters<typeof speakText>[2]) {
+function resolveVoiceSettings(settings: AppSettings) {
   if (settings.voice.provider === "voicevox" && !hasPaidAccess(settings.billing)) {
-    speakText(text, { ...settings.voice, provider: "system" }, callbacks);
-    return;
+    return { ...settings.voice, provider: "system" as const };
   }
-  speakText(text, settings.voice, callbacks);
+  return settings.voice;
+}
+
+function speakWithGate(text: string, settings: AppSettings, callbacks?: Parameters<typeof speakText>[2]) {
+  speakText(text, resolveVoiceSettings(settings), callbacks);
+}
+
+/**
+ * AIの返答をストリーミングに合わせて逐次読み上げるための、キュー追加版のspeakWithGate。
+ * 全文が揃うのを待たずに、文が確定するたびに読み上げを開始できるので体感速度が上がる。
+ */
+function enqueueWithGate(text: string, settings: AppSettings) {
+  enqueueSpeech(text, resolveVoiceSettings(settings));
 }
 
 const APP_DISCLAIMER =
@@ -80,6 +92,8 @@ export default function ChatScreen() {
     async (text: string, inputMode: "text" | "voice") => {
       if (!text.trim() || !settings) return;
       setErrorBanner(null);
+      // 前回の返答の読み上げが続いていた場合、新しい相談を送ったタイミングで打ち切る
+      stopSpeaking();
 
       const userMsg: ChatMessage = {
         id: makeId(),
@@ -95,12 +109,27 @@ export default function ChatScreen() {
       setIsSending(true);
       setStreamingText("");
 
+      // 「高速重視」モデルを選んでいても、全文が生成し終わるまで読み上げが始まらないと
+      // 体感の応答が遅く感じられる。文の区切り(。！？や改行)が届くたびに、その文だけ
+      // 先行して読み上げキューに追加していくことで、返答の生成と再生を並行させる。
+      const shouldSpeak = settings.voice.autoSpeak || inputMode === "voice";
+      let spokenUpTo = 0;
+
       const { promise, abort } = streamAiReply(
         working,
         settings.persona,
         settings.ai,
         settings.billing,
-        (partial) => setStreamingText(partial)
+        (partial) => {
+          setStreamingText(partial);
+          if (shouldSpeak) {
+            const { chunks, consumedUpTo } = extractSpeakableChunks(partial, spokenUpTo);
+            for (const chunk of chunks) {
+              enqueueWithGate(chunk, settings);
+            }
+            spokenUpTo = consumedUpTo;
+          }
+        }
       );
       activeStreamRef.current = { abort };
 
@@ -115,9 +144,12 @@ export default function ChatScreen() {
         };
         persistMessages([...working, aiMsg]);
 
-        const shouldSpeak = settings.voice.autoSpeak || inputMode === "voice";
         if (shouldSpeak) {
-          speakWithGate(reply, settings);
+          // 句読点が付かないまま終わった末尾の断片(最後の一文など)を読み上げる
+          const tail = reply.slice(spokenUpTo).trim();
+          if (tail) {
+            enqueueWithGate(tail, settings);
+          }
         }
       } catch (e) {
         if (e instanceof AiConfigError || e instanceof AiRequestError) {
@@ -149,6 +181,20 @@ export default function ChatScreen() {
       </View>
     );
   }
+
+  const theme = resolveThemeColors(settings.theme, settings.billing);
+
+  // PC(Web)でChat欄にフォーカスがある間、Ctrl+Enter(Macは⌘+Enter)で送信する。
+  // 素のEnterは(multilineなので)改行のままにし、誤送信を防ぐ。
+  const handleInputKeyPress = (e: any) => {
+    if (Platform.OS !== "web") return;
+    if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
+      e.preventDefault?.();
+      if (!isSending && inputText.trim()) {
+        sendMessage(inputText, "text");
+      }
+    }
+  };
 
   const displayMessages: ChatMessage[] =
     streamingText != null
@@ -192,6 +238,7 @@ export default function ChatScreen() {
         renderItem={({ item }) => (
           <ChatBubble
             message={item}
+            accentColor={theme.buttonColor}
             onSpeak={
               item.role === "assistant" && item.id !== "__streaming__"
                 ? (t) => speakWithGate(t, settings)
@@ -225,6 +272,7 @@ export default function ChatScreen() {
         <VoiceButton
           isListening={voice.isListening}
           disabled={isSending}
+          idleColor={theme.buttonColor}
           onPress={() => {
             stopSpeaking();
             voice.isListening ? voice.stop() : voice.start();
@@ -232,14 +280,19 @@ export default function ChatScreen() {
         />
         <TextInput
           style={styles.textInput}
-          placeholder="ここに入力…"
+          placeholder="ここに入力…（PCではCtrl+Enterで送信）"
           value={inputText}
           onChangeText={setInputText}
+          onKeyPress={handleInputKeyPress}
           multiline
           editable={!isSending}
         />
         <Pressable
-          style={[styles.sendButton, (isSending || !inputText.trim()) && styles.sendDisabled]}
+          style={[
+            styles.sendButton,
+            { backgroundColor: theme.buttonColor },
+            (isSending || !inputText.trim()) && styles.sendDisabled,
+          ]}
           disabled={isSending || !inputText.trim()}
           onPress={() => sendMessage(inputText, "text")}
         >
