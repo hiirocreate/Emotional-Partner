@@ -4,9 +4,11 @@ import { ChatMessage } from "../lib/types";
 interface Props {
   message: ChatMessage;
   onSpeak?: (text: string) => void;
+  /** テーマのアクセントカラー。指定時はユーザー側の吹き出し色をこれで上書きする */
+  accentColor?: string;
 }
 
-export function ChatBubble({ message, onSpeak }: Props) {
+export function ChatBubble({ message, onSpeak, accentColor }: Props) {
   const isUser = message.role === "user";
   return (
     <View
@@ -19,6 +21,7 @@ export function ChatBubble({ message, onSpeak }: Props) {
         style={[
           styles.bubble,
           isUser ? styles.userBubble : styles.aiBubble,
+          isUser && accentColor ? { backgroundColor: accentColor } : null,
         ]}
       >
         <Text style={isUser ? styles.userText : styles.aiText}>
