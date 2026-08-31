@@ -38,12 +38,12 @@ import { listAvailableVoices, listVoicevoxSpeakers, speakText } from "../lib/voi
 const PROXY_MODEL_PRESETS = [
   {
     label: "高速重視",
-    model: "llama-3.1-8b-instant",
-    note: "最速クラスの応答(参考値: 500〜600トークン/秒)。日常会話にはこちらがおすすめです。",
+    model: "openai/gpt-oss-20b",
+    note: "最速クラスの応答。日常会話にはこちらがおすすめです。",
   },
   {
     label: "精度重視",
-    model: "llama-3.3-70b-versatile",
+    model: "openai/gpt-oss-120b",
     note: "高速重視より少し時間がかかりますが、文脈理解や表現の自然さが向上します。",
   },
 ];
@@ -53,13 +53,13 @@ const CUSTOM_AI_PROVIDER_PRESETS = [
   {
     label: "Groq: 高速重視",
     baseUrl: "https://api.groq.com/openai/v1",
-    model: "llama-3.1-8b-instant",
-    note: "最速クラスの応答(参考値: 500〜600トークン/秒)。日常会話にはこちらがおすすめです。",
+    model: "openai/gpt-oss-20b",
+    note: "最速クラスの応答。日常会話にはこちらがおすすめです。",
   },
   {
     label: "Groq: 精度重視",
     baseUrl: "https://api.groq.com/openai/v1",
-    model: "llama-3.3-70b-versatile",
+    model: "openai/gpt-oss-120b",
     note: "高速重視より少し時間がかかりますが、文脈理解や表現の自然さが向上します。",
   },
   {
