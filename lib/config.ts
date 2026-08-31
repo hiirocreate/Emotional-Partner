@@ -24,8 +24,7 @@ export const SHARED_PROXY_BASE_URL = "https://kokorotalk-proxy.h-onoue-test.work
  * 悪用が心配な場合は、後述のレート制限(Cloudflare Workers Rate Limiting)を
  * あわせて設定してください。
  */
-export const SHARED_PROXY_APP_SECRET = "kokorononakahanozokenai
-";
+export const SHARED_PROXY_APP_SECRET = "kokorononakahanozokenai";
 
 /** 共有プロキシが利用可能かどうか(値が設定されているか)を返す */
 export function isSharedProxyConfigured(): boolean {
