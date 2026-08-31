@@ -107,11 +107,32 @@ export interface BillingSettings {
   lastCheckedAt: number | null;
 }
 
+/**
+ * 配色テーマ。プラン状態によって編集できる範囲が変わる:
+ * - 管理者: customColorsを自由に設定できる(最優先で適用される)
+ * - サブスク(有料プラン): presetIdをプリセットの中から選べる
+ * - 無料: 常にデフォルト配色(下記どちらの項目も無視される)
+ */
+export type ThemePresetId = "default" | "ocean" | "sunset" | "forest" | "lavender" | "mono";
+
+export interface CustomThemeColors {
+  baseColor: string;
+  buttonColor: string;
+  textColor: string;
+}
+
+export interface ThemeSettings {
+  presetId: ThemePresetId;
+  /** 管理者のみが設定できる自由な配色。nullでない場合、presetIdより優先される */
+  customColors: CustomThemeColors | null;
+}
+
 export interface AppSettings {
   persona: PersonaSettings;
   voice: VoiceSettings;
   ai: AiProviderSettings;
   billing: BillingSettings;
+  theme: ThemeSettings;
   onboardingDone: boolean;
 }
 
@@ -149,6 +170,10 @@ export const DEFAULT_SETTINGS: AppSettings = {
     status: "unknown",
     expiresAt: null,
     lastCheckedAt: null,
+  },
+  theme: {
+    presetId: "default",
+    customColors: null,
   },
   onboardingDone: false,
 };
