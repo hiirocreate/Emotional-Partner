@@ -49,6 +49,56 @@ export function isValidHexColor(value: string): boolean {
   return HEX_COLOR_RE.test(value.trim());
 }
 
+/**
+ * 管理者向けの自由配色を、カラーコードの手入力ではなくタップで選べるようにするための色見本。
+ * 役割ごとに見やすい範囲の色だけを並べている(ベースは淡い色、ボタンは目立つ色、
+ * テキストは読みやすい濃い色)。
+ */
+export const BASE_COLOR_SWATCHES: string[] = [
+  "#FFFFFF",
+  "#F7F7FA",
+  "#F5F5F7",
+  "#EAF3FF",
+  "#F0F8FF",
+  "#FFF6EE",
+  "#FFFDE7",
+  "#F1F8F0",
+  "#EFFBF6",
+  "#F5F0FF",
+  "#FFF0F5",
+  "#F6F1E7",
+];
+
+export const BUTTON_COLOR_SWATCHES: string[] = [
+  "#4A7DFF",
+  "#2F8FD9",
+  "#00A3A3",
+  "#26A69A",
+  "#3F9152",
+  "#8BC34A",
+  "#F2A93B",
+  "#FF7A45",
+  "#FF5A5F",
+  "#E0527A",
+  "#EC6BAD",
+  "#8A63D2",
+  "#5C6BC0",
+  "#3A3A44",
+];
+
+export const TEXT_COLOR_SWATCHES: string[] = [
+  "#26263A",
+  "#1C1C22",
+  "#000000",
+  "#123A52",
+  "#1F3B22",
+  "#332255",
+  "#4A2130",
+  "#5A3018",
+  "#3A2E00",
+  "#212121",
+];
+
 export function resolveThemeColors(theme: ThemeSettings, billing: BillingSettings): ThemeColors {
   const isAdmin = billing.status === "admin";
   const isSubscriber = isAdmin || billing.status === "active";
