@@ -30,3 +30,18 @@ export const SHARED_PROXY_APP_SECRET = "kokorononakahanozokenai";
 export function isSharedProxyConfigured(): boolean {
   return Boolean(SHARED_PROXY_BASE_URL && SHARED_PROXY_APP_SECRET);
 }
+
+/**
+ * 有料プラン(サブスクリプション)の決済ページURL。
+ * Stripeの「決済リンク(Payment Link)」を発行し、そのURLをそのまま設定してください
+ * (`https://buy.stripe.com/xxxxx` の形式)。詳しい手順は proxy-worker/README.md を参照。
+ *
+ * アプリ側はこのURLの末尾に `?client_reference_id=<この端末のコード>` を自動的に
+ * 付け加えて開くため、ここには素のPayment LinkのURLだけを設定すればよい。
+ */
+export const BILLING_SUBSCRIBE_URL = "https://buy.stripe.com/test_fZufZhaZu0dHbCXdM8dUY00";
+
+/** 有料プランの決済リンクが設定済みかどうか */
+export function isBillingConfigured(): boolean {
+  return Boolean(BILLING_SUBSCRIBE_URL);
+}
