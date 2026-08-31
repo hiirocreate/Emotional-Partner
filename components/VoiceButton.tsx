@@ -5,10 +5,12 @@ interface Props {
   isListening: boolean;
   disabled?: boolean;
   onPress: () => void;
+  /** テーマのアクセントカラー。指定時は待機中(非録音時)の色をこれで上書きする */
+  idleColor?: string;
 }
 
 /** 一般的なチャットアプリでよく見る丸型のマイクボタン(録音中は停止アイコンに切り替わる) */
-export function VoiceButton({ isListening, disabled, onPress }: Props) {
+export function VoiceButton({ isListening, disabled, onPress, idleColor }: Props) {
   return (
     <Pressable
       onPress={onPress}
@@ -16,6 +18,7 @@ export function VoiceButton({ isListening, disabled, onPress }: Props) {
       style={[
         styles.button,
         isListening ? styles.listening : styles.idle,
+        !isListening && idleColor ? { backgroundColor: idleColor } : null,
         disabled ? styles.disabled : null,
       ]}
     >
