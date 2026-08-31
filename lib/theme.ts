@@ -49,55 +49,43 @@ export function isValidHexColor(value: string): boolean {
   return HEX_COLOR_RE.test(value.trim());
 }
 
+function hslToHex(h: number, s: number, l: number): string {
+  const sf = s / 100;
+  const lf = l / 100;
+  const k = (n: number) => (n + h / 30) % 12;
+  const a = sf * Math.min(lf, 1 - lf);
+  const f = (n: number) => lf - a * Math.max(-1, Math.min(k(n) - 3, Math.min(9 - k(n), 1)));
+  const toHex = (x: number) => Math.round(x * 255).toString(16).padStart(2, "0");
+  return `#${toHex(f(0))}${toHex(f(8))}${toHex(f(4))}`.toUpperCase();
+}
+
+// 白→黒までの無彩色(グレースケール)
+const NEUTRAL_SWATCHES: string[] = [
+  "#FFFFFF",
+  "#F2F2F5",
+  "#DADAE2",
+  "#B0B0BC",
+  "#84848F",
+  "#5A5A66",
+  "#3A3A44",
+  "#26263A",
+  "#15151C",
+  "#000000",
+];
+
+// 色相を12方向、明るさを4段階(明るい〜暗い)に振って生成した色見本
+const HUE_STEPS = [0, 30, 60, 90, 130, 165, 190, 215, 250, 280, 320, 345];
+const LIGHTNESS_STEPS = [82, 64, 46, 28];
+const HUE_SWATCHES: string[] = HUE_STEPS.flatMap((h) =>
+  LIGHTNESS_STEPS.map((l) => hslToHex(h, 62, l))
+);
+
 /**
  * 管理者向けの自由配色を、カラーコードの手入力ではなくタップで選べるようにするための色見本。
- * 役割ごとに見やすい範囲の色だけを並べている(ベースは淡い色、ボタンは目立つ色、
- * テキストは読みやすい濃い色)。
+ * 「ベースを黒めにして、テキストやボタンを白めにする」のような反転構成も選べるように、
+ * ベース/ボタン/テキストのどの項目にも同じ(白〜黒+多彩な色相)一覧を使う。
  */
-export const BASE_COLOR_SWATCHES: string[] = [
-  "#FFFFFF",
-  "#F7F7FA",
-  "#F5F5F7",
-  "#EAF3FF",
-  "#F0F8FF",
-  "#FFF6EE",
-  "#FFFDE7",
-  "#F1F8F0",
-  "#EFFBF6",
-  "#F5F0FF",
-  "#FFF0F5",
-  "#F6F1E7",
-];
-
-export const BUTTON_COLOR_SWATCHES: string[] = [
-  "#4A7DFF",
-  "#2F8FD9",
-  "#00A3A3",
-  "#26A69A",
-  "#3F9152",
-  "#8BC34A",
-  "#F2A93B",
-  "#FF7A45",
-  "#FF5A5F",
-  "#E0527A",
-  "#EC6BAD",
-  "#8A63D2",
-  "#5C6BC0",
-  "#3A3A44",
-];
-
-export const TEXT_COLOR_SWATCHES: string[] = [
-  "#26263A",
-  "#1C1C22",
-  "#000000",
-  "#123A52",
-  "#1F3B22",
-  "#332255",
-  "#4A2130",
-  "#5A3018",
-  "#3A2E00",
-  "#212121",
-];
+export const COLOR_SWATCHES: string[] = [...NEUTRAL_SWATCHES, ...HUE_SWATCHES];
 
 export function resolveThemeColors(theme: ThemeSettings, billing: BillingSettings): ThemeColors {
   const isAdmin = billing.status === "admin";
