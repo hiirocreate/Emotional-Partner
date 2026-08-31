@@ -206,6 +206,34 @@ async function speakWithVoicevox(
 }
 
 async function playWavArrayBuffer(arrayBuffer: ArrayBuffer, callbacks: SpeakCallbacks) {
+  if (isWeb()) {
+    // expo-file-system はWeb版では機能しない(スタブ実装)ため、
+    // ブラウザ標準のBlob URLを使って再生する。
+    try {
+      const blob = new Blob([arrayBuffer], { type: "audio/wav" });
+      const url = URL.createObjectURL(blob);
+      const player = createAudioPlayer(url);
+      currentVoicevoxPlayer = player;
+      const cleanup = () => {
+        subscription.remove();
+        player.remove();
+        if (currentVoicevoxPlayer === player) currentVoicevoxPlayer = null;
+        URL.revokeObjectURL(url);
+      };
+      const subscription = player.addListener("playbackStatusUpdate", (status) => {
+        if (status.didJustFinish) {
+          cleanup();
+          callbacks.onDone?.();
+        }
+      });
+      player.play();
+    } catch (e) {
+      console.warn("音声の再生に失敗しました", e);
+      callbacks.onError?.();
+    }
+    return;
+  }
+
   try {
     const bytes = new Uint8Array(arrayBuffer);
     const file = new File(Paths.cache, `kokorotalk-tts-${Date.now()}.wav`);
