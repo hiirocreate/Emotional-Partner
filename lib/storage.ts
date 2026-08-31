@@ -26,9 +26,20 @@ export async function loadSettings(): Promise<AppSettings> {
           ...DEFAULT_SETTINGS.voice.voicevox,
           ...parsed.voice?.voicevox,
         },
+        google: {
+          ...DEFAULT_SETTINGS.voice.google,
+          ...parsed.voice?.google,
+        },
       },
       ai: { ...DEFAULT_SETTINGS.ai, ...parsed.ai },
       billing: { ...DEFAULT_SETTINGS.billing, ...parsed.billing },
+      theme: {
+        ...DEFAULT_SETTINGS.theme,
+        ...parsed.theme,
+        customColors: parsed.theme?.customColors
+          ? { ...parsed.theme.customColors }
+          : null,
+      },
     };
   } catch (e) {
     console.warn("設定の読み込みに失敗しました", e);
