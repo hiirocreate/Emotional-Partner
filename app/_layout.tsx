@@ -14,7 +14,7 @@ export default function RootLayout() {
           contentStyle: { backgroundColor: "#FFFFFF" },
         }}
       >
-        <Stack.Screen name="index" options={{ title: "こころトーク" }} />
+        <Stack.Screen name="index" options={{ title: "EmPa" }} />
         <Stack.Screen name="settings" options={{ title: "設定" }} />
         <Stack.Screen name="oauth/openrouter" options={{ title: "接続中…", headerShown: false }} />
       </Stack>

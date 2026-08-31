@@ -87,7 +87,7 @@ export async function connectOpenRouterAccount(): Promise<string | null> {
     `${AUTHORIZE_URL}?callback_url=${encodeURIComponent(redirectUri)}` +
     `&code_challenge=${encodeURIComponent(codeChallenge)}` +
     `&code_challenge_method=S256` +
-    `&key_label=${encodeURIComponent("kokorotalk")}`;
+    `&key_label=${encodeURIComponent("EmPa")}`;
 
   const result = await WebBrowser.openAuthSessionAsync(authUrl, redirectUri);
 

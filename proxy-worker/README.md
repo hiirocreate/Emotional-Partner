@@ -1,4 +1,4 @@
-# こころトーク 共有プロキシ (proxy-worker)
+# EmPa 共有プロキシ (proxy-worker)
 
 アプリの利用者がGroqのAPIキーを各自発行しなくても対話AIを使えるようにするための、Cloudflare Workers製の小さな中継サーバーです。無料枠(1日10万リクエストまで)で運用できます。
 

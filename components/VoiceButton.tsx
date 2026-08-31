@@ -1,4 +1,5 @@
-import { Pressable, StyleSheet, Text } from "react-native";
+import { Pressable, StyleSheet } from "react-native";
+import { Ionicons } from "@expo/vector-icons";
 
 interface Props {
   isListening: boolean;
@@ -6,6 +7,7 @@ interface Props {
   onPress: () => void;
 }
 
+/** 一般的なチャットアプリでよく見る丸型のマイクボタン(録音中は停止アイコンに切り替わる) */
 export function VoiceButton({ isListening, disabled, onPress }: Props) {
   return (
     <Pressable
@@ -17,7 +19,7 @@ export function VoiceButton({ isListening, disabled, onPress }: Props) {
         disabled ? styles.disabled : null,
       ]}
     >
-      <Text style={styles.icon}>{isListening ? "⏹" : "🎤"}</Text>
+      <Ionicons name={isListening ? "stop" : "mic"} size={22} color="#fff" />
     </Pressable>
   );
 }
@@ -33,5 +35,4 @@ const styles = StyleSheet.create({
   idle: { backgroundColor: "#4A7DFF" },
   listening: { backgroundColor: "#FF5A5F" },
   disabled: { opacity: 0.4 },
-  icon: { fontSize: 22 },
 });

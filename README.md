@@ -1,4 +1,4 @@
-# こころトーク（テスト版）
+# EmPa（テスト版）
 
 相談用（メンタルケア用）音声AIアプリのプロトタイプです。React Native (Expo) 製で、**同じコードから Web版とAndroid(APK)版の両方**をビルドできます。すべて無料枠のツールのみで構成しています。
 
@@ -147,7 +147,7 @@ docker run --rm -p 127.0.0.1:50021:50021 voicevox/voicevox_engine:cpu-latest
 
 ### APK版（Android）
 
-`.github/workflows/build-apk.yml` が `main` ブランチへのpush、または手動実行（Actionsタブ → "Build Android APK" → "Run workflow"）でAPKをビルドします。ビルドが完了すると、そのワークフロー実行画面の "Artifacts" から `kokoro-talk-apk` をダウンロードできます。
+`.github/workflows/build-apk.yml` が `main` ブランチへのpush、または手動実行（Actionsタブ → "Build Android APK" → "Run workflow"）でAPKをビルドします。ビルドが完了すると、そのワークフロー実行画面の "Artifacts" から `empa-apk` をダウンロードできます。
 
 - テスト用に、Androidのデフォルトdebug署名でビルドしています。Google Playなどストア配布する場合は別途リリース署名の設定が必要です。
 - GitHub Actionsは無料枠（パブリックリポジトリは無料、プライベートリポジトリも月2,000分無料）で完結します。

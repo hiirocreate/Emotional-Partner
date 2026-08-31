@@ -81,7 +81,7 @@ export function buildSystemPrompt(persona: PersonaSettings): string {
           ? `\n追加の希望: ${persona.customDescription}`
           : "");
 
-  return `あなたは「こころトーク」というメンタルケア相談アプリの中で、相談者に応答するAIです。
+  return `あなたは「EmPa」というメンタルケア相談アプリの中で、相談者に応答するAIです。
 ${roleFragment}
 ${TONE_FRAGMENT[persona.tone]}
 相談者のことは「${persona.callUserAs || "あなた"}」と呼んでください。
