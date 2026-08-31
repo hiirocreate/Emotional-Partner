@@ -31,13 +31,33 @@ import {
   hasPaidAccess,
 } from "../lib/billing";
 import { clearHistory, loadSettings, saveSettings } from "../lib/storage";
-import { AiConnectionMode, AppSettings, PersonaPresetId, TtsProviderId, VoiceOption } from "../lib/types";
+import {
+  DEFAULT_THEME_COLORS,
+  isValidHexColor,
+  resolveThemeColors,
+  THEME_PRESET_LIST,
+} from "../lib/theme";
+import {
+  AiConnectionMode,
+  AppSettings,
+  CustomThemeColors,
+  PersonaPresetId,
+  ThemePresetId,
+  TtsProviderId,
+  VoiceOption,
+} from "../lib/types";
 import {
   listAvailableVoices,
   listGoogleTtsVoices,
   listVoicevoxSpeakers,
   speakText,
 } from "../lib/voiceOutput";
+import {
+  getCachedGoogleVoices,
+  getCachedVoicevoxVoices,
+  setCachedGoogleVoices,
+  setCachedVoicevoxVoices,
+} from "../lib/voiceListCache";
 
 const GOOGLE_TTS_SETUP_URL =
   "https://console.cloud.google.com/apis/library/texttospeech.googleapis.com";
@@ -132,6 +152,9 @@ export default function SettingsScreen() {
   const [openRouterConnecting, setOpenRouterConnecting] = useState(false);
   const [licenseCodeDraft, setLicenseCodeDraft] = useState("");
   const [billingChecking, setBillingChecking] = useState(false);
+  const [customColorDraft, setCustomColorDraft] = useState<CustomThemeColors>({
+    ...DEFAULT_THEME_COLORS,
+  });
 
   useEffect(() => {
     (async () => {
@@ -156,13 +179,26 @@ export default function SettingsScreen() {
       setVoicevoxUrlDraft(s.voice.voicevox.baseUrl);
       setGoogleApiKeyDraft(s.voice.google.apiKey);
       setLicenseCodeDraft(s.billing.licenseCode);
+      setCustomColorDraft(s.theme.customColors ?? { ...DEFAULT_THEME_COLORS });
       const v = await listAvailableVoices();
       setSystemVoices(v);
+      // 画面を行き来するたびに毎回サーバーへ問い合わせるのを避けるため、
+      // まずキャッシュを見る。無ければ(初回、またはURL/キー変更後のみ)取得する。
       if (s.voice.voicevox.baseUrl) {
-        fetchVoicevoxSpeakers(s.voice.voicevox.baseUrl, false);
+        const cached = getCachedVoicevoxVoices(s.voice.voicevox.baseUrl);
+        if (cached) {
+          setVoicevoxSpeakers(cached);
+        } else {
+          fetchVoicevoxSpeakers(s.voice.voicevox.baseUrl, false);
+        }
       }
       if (s.voice.google.apiKey) {
-        fetchGoogleVoices(s.voice.google.apiKey, false);
+        const cached = getCachedGoogleVoices(s.voice.google.apiKey);
+        if (cached) {
+          setGoogleVoices(cached);
+        } else {
+          fetchGoogleVoices(s.voice.google.apiKey, false);
+        }
       }
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -222,6 +258,7 @@ export default function SettingsScreen() {
     try {
       const speakers = await listVoicevoxSpeakers(baseUrl);
       setVoicevoxSpeakers(speakers);
+      setCachedVoicevoxVoices(baseUrl, speakers);
       if (persistUrl) {
         await persist({
           ...settings,
@@ -254,6 +291,7 @@ export default function SettingsScreen() {
     try {
       const voices = await listGoogleTtsVoices(apiKey);
       setGoogleVoices(voices);
+      setCachedGoogleVoices(apiKey, voices);
       if (persistKey) {
         await persist({
           ...settings,
@@ -473,6 +511,36 @@ export default function SettingsScreen() {
     );
   };
 
+  const onSelectThemePreset = (id: ThemePresetId) => {
+    // プリセットを選んだら、管理者の自由配色(customColors)は解除してプリセットを反映させる
+    persist({ ...settings, theme: { presetId: id, customColors: null } });
+  };
+
+  const onChangeCustomColor = (field: keyof CustomThemeColors, value: string) => {
+    setCustomColorDraft((d) => ({ ...d, [field]: value }));
+  };
+
+  const handleSaveCustomTheme = () => {
+    const draft = customColorDraft;
+    if (
+      !isValidHexColor(draft.baseColor) ||
+      !isValidHexColor(draft.buttonColor) ||
+      !isValidHexColor(draft.textColor)
+    ) {
+      showAlert(
+        "色の形式が正しくありません",
+        "#RRGGBB または #RGB の形式で入力してください(例: #4A7DFF)。"
+      );
+      return;
+    }
+    persist({ ...settings, theme: { ...settings.theme, customColors: { ...draft } } });
+  };
+
+  const handleResetCustomTheme = () => {
+    setCustomColorDraft({ ...DEFAULT_THEME_COLORS });
+    persist({ ...settings, theme: { ...settings.theme, customColors: null } });
+  };
+
   const onChangeCallUserAs = (v: string) => {
     update((d) => ({ ...d, persona: { ...d.persona, callUserAs: v } }));
   };
@@ -518,6 +586,10 @@ export default function SettingsScreen() {
       : settings.voice.provider === "google"
       ? settings.voice.google.voiceName
       : settings.voice.selectedVoiceId;
+
+  const isAdmin = settings.billing.status === "admin";
+  const isThemeSubscriber = isAdmin || settings.billing.status === "active";
+  const themeColors = resolveThemeColors(settings.theme, settings.billing);
 
   return (
     <ScrollView style={styles.container} contentContainerStyle={{ padding: 16, paddingBottom: 60 }}>
@@ -849,6 +921,98 @@ export default function SettingsScreen() {
         </Pressable>
       </Section>
 
+      <Section title="カラーテーマ">
+        {isAdmin ? (
+          <>
+            <Text style={styles.helper}>
+              管理者は配色を自由に指定できます(ベースカラー・ボタンカラー・テキストカラー)。ここで設定した配色は、サブスクの方が選ぶプリセットより優先されます。
+            </Text>
+            <View style={styles.themePreviewRow}>
+              <View style={[styles.themeSwatch, { backgroundColor: themeColors.baseColor }]} />
+              <View style={[styles.themeSwatch, { backgroundColor: themeColors.buttonColor }]} />
+              <View style={[styles.themeSwatch, { backgroundColor: themeColors.textColor }]} />
+              <Text style={styles.smallHelper}>← 現在の配色(ベース/ボタン/テキスト)</Text>
+            </View>
+
+            <Text style={styles.label}>ベースカラー</Text>
+            <TextInput
+              style={styles.input}
+              value={customColorDraft.baseColor}
+              onChangeText={(v) => onChangeCustomColor("baseColor", v)}
+              autoCapitalize="none"
+              placeholder="#FFFFFF"
+            />
+            <Text style={styles.label}>ボタンカラー</Text>
+            <TextInput
+              style={styles.input}
+              value={customColorDraft.buttonColor}
+              onChangeText={(v) => onChangeCustomColor("buttonColor", v)}
+              autoCapitalize="none"
+              placeholder="#4A7DFF"
+            />
+            <Text style={styles.label}>テキストカラー</Text>
+            <TextInput
+              style={styles.input}
+              value={customColorDraft.textColor}
+              onChangeText={(v) => onChangeCustomColor("textColor", v)}
+              autoCapitalize="none"
+              placeholder="#26263A"
+            />
+
+            <View style={styles.chipWrap}>
+              <Pressable
+                style={[styles.primaryButton, { backgroundColor: themeColors.buttonColor }]}
+                onPress={handleSaveCustomTheme}
+              >
+                <Text style={styles.primaryButtonText}>この配色を保存</Text>
+              </Pressable>
+            </View>
+            {settings.theme.customColors ? (
+              <Pressable onPress={handleResetCustomTheme}>
+                <Text style={styles.linkText}>自由設定をやめてプリセットに戻す</Text>
+              </Pressable>
+            ) : null}
+
+            <Text style={[styles.label, { marginTop: 14 }]}>プリセットから選ぶ(自由設定は解除されます)</Text>
+          </>
+        ) : !isThemeSubscriber ? (
+          <Text style={styles.errorHelper}>
+            カラーテーマの変更は有料プランの方のみご利用いただけます。上の「利用プラン」から加入するか、管理者コードを入力してください(未加入の間は標準の配色になります)。
+          </Text>
+        ) : (
+          <Text style={styles.smallHelper}>お好みの配色をプリセットから選べます。</Text>
+        )}
+
+        {isThemeSubscriber ? (
+          <View style={styles.chipWrap}>
+            {THEME_PRESET_LIST.map((preset) => (
+              <Pressable
+                key={preset.id}
+                onPress={() => onSelectThemePreset(preset.id)}
+                style={[
+                  styles.themePresetChip,
+                  !settings.theme.customColors &&
+                    settings.theme.presetId === preset.id &&
+                    styles.chipActive,
+                ]}
+              >
+                <View style={[styles.themeSwatch, styles.themeSwatchSmall, { backgroundColor: preset.buttonColor }]} />
+                <Text
+                  style={[
+                    styles.chipText,
+                    !settings.theme.customColors &&
+                      settings.theme.presetId === preset.id &&
+                      styles.chipTextActive,
+                  ]}
+                >
+                  {preset.label}
+                </Text>
+              </Pressable>
+            ))}
+          </View>
+        ) : null}
+      </Section>
+
       <Section title="対話AIの接続設定">
         <Text style={styles.helper}>
           返答はストリーミング表示され、生成され次第すぐに読めます。
@@ -1112,6 +1276,24 @@ const styles = StyleSheet.create({
   },
   chipWrap: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
   chip: {
+    paddingHorizontal: 12,
+    paddingVertical: 7,
+    borderRadius: 16,
+    backgroundColor: "#EDEEF5",
+  },
+  themePreviewRow: { flexDirection: "row", alignItems: "center", gap: 6, marginBottom: 10 },
+  themeSwatch: {
+    width: 28,
+    height: 28,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: "#DADAE6",
+  },
+  themeSwatchSmall: { width: 16, height: 16, borderRadius: 5 },
+  themePresetChip: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
     paddingHorizontal: 12,
     paddingVertical: 7,
     borderRadius: 16,
