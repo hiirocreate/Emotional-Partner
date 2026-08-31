@@ -31,10 +31,10 @@ export interface PersonaSettings {
 }
 
 /** 音声合成(TTS)の音源プロバイダ */
-export type TtsProviderId = "system" | "voicevox";
+export type TtsProviderId = "system" | "voicevox" | "google";
 
 export interface VoiceOption {
-  id: string; // OS/ブラウザ、またはVOICEVOXが返すvoice/speaker identifier
+  id: string; // OS/ブラウザ、またはVOICEVOX/Google Cloud TTSが返すvoice/speaker identifier
   label: string; // UI表示名
   lang: string;
 }
@@ -46,11 +46,23 @@ export interface VoicevoxSettings {
   speakerId: number | null;
 }
 
+/**
+ * Google Cloud Text-to-Speech の設定。
+ * 常時稼働サーバーが不要な代替手段として、利用者自身のAPIキーで
+ * 直接Google CloudのTTS APIを呼び出す(「自分のAPIキーを使う」AI接続と同じ考え方)。
+ */
+export interface GoogleTtsSettings {
+  apiKey: string;
+  /** 選択中の音声名 例: ja-JP-Neural2-B */
+  voiceName: string | null;
+}
+
 export interface VoiceSettings {
   provider: TtsProviderId;
   /** provider="system" のときに使う、端末/ブラウザ内蔵ボイスのID */
   selectedVoiceId: string | null;
   voicevox: VoicevoxSettings;
+  google: GoogleTtsSettings;
   autoSpeak: boolean; // AIの返答を自動で読み上げるか
   rate: number;
   pitch: number;
@@ -116,6 +128,10 @@ export const DEFAULT_SETTINGS: AppSettings = {
     voicevox: {
       baseUrl: "",
       speakerId: null,
+    },
+    google: {
+      apiKey: "",
+      voiceName: null,
     },
     autoSpeak: false,
     rate: 1.0,
