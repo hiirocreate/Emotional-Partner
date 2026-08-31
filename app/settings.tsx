@@ -16,8 +16,15 @@ import { useRouter } from "expo-router";
 import * as Clipboard from "expo-clipboard";
 
 import { PERSONA_PRESETS } from "../lib/personas";
-import { isSharedProxyConfigured } from "../lib/config";
+import { isBillingConfigured, isSharedProxyConfigured } from "../lib/config";
 import { connectOpenRouterAccount } from "../lib/openrouterOAuth";
+import {
+  BillingCheckError,
+  buildSubscribeUrl,
+  checkLicenseStatus,
+  generateLicenseCode,
+  hasPaidAccess,
+} from "../lib/billing";
 import { clearHistory, loadSettings, saveSettings } from "../lib/storage";
 import { AiConnectionMode, AppSettings, PersonaPresetId, TtsProviderId, VoiceOption } from "../lib/types";
 import { listAvailableVoices, listVoicevoxSpeakers, speakText } from "../lib/voiceOutput";
@@ -72,13 +79,21 @@ export default function SettingsScreen() {
   const [voicevoxError, setVoicevoxError] = useState<string | null>(null);
   const [customPersonaText, setCustomPersonaText] = useState("");
   const [openRouterConnecting, setOpenRouterConnecting] = useState(false);
+  const [licenseCodeDraft, setLicenseCodeDraft] = useState("");
+  const [billingChecking, setBillingChecking] = useState(false);
 
   useEffect(() => {
     (async () => {
-      const s = await loadSettings();
+      let s = await loadSettings();
+      // この端末用のライセンスコードがまだ無ければ生成して保存しておく
+      if (!s.billing.licenseCode) {
+        s = { ...s, billing: { ...s.billing, licenseCode: generateLicenseCode() } };
+        await saveSettings(s);
+      }
       setSettings(s);
       setCustomPersonaText(s.persona.customDescription);
       setVoicevoxUrlDraft(s.voice.voicevox.baseUrl);
+      setLicenseCodeDraft(s.billing.licenseCode);
       const v = await listAvailableVoices();
       setSystemVoices(v);
       if (s.voice.voicevox.baseUrl) {
@@ -111,6 +126,13 @@ export default function SettingsScreen() {
   };
 
   const onSelectTtsProvider = (provider: TtsProviderId) => {
+    if (provider === "voicevox" && !hasPaidAccess(settings.billing)) {
+      Alert.alert(
+        "有料プランが必要です",
+        "VOICEVOX(端末にない読み上げボイス)のご利用には、有料プランへの加入または管理者コードの入力が必要です。下の「利用プラン」欄からご確認ください。"
+      );
+      return;
+    }
     persist({ ...settings, voice: { ...settings.voice, provider } });
   };
 
@@ -168,6 +190,13 @@ export default function SettingsScreen() {
   };
 
   const onSelectAiMode = (mode: AiConnectionMode) => {
+    if (mode === "proxy" && settings.ai.mode !== "proxy" && !hasPaidAccess(settings.billing)) {
+      Alert.alert(
+        "有料プランが必要です",
+        "備え付けのAI(共有プロキシ)のご利用には、有料プランへの加入または管理者コードの入力が必要です。上の「利用プラン」欄からご確認いただくか、「自分のAPIキーを使う」をお使いください。"
+      );
+      return;
+    }
     if (mode === "proxy") {
       persist({
         ...settings,
@@ -266,13 +295,90 @@ export default function SettingsScreen() {
   };
   const onBlurModel = () => persist(settings);
 
+  const onChangeLicenseCode = (v: string) => setLicenseCodeDraft(v);
+  const onBlurLicenseCode = () => {
+    if (licenseCodeDraft.trim() === settings.billing.licenseCode) return;
+    persist({
+      ...settings,
+      billing: { ...settings.billing, licenseCode: licenseCodeDraft.trim(), status: "unknown", expiresAt: null },
+    });
+  };
+
+  const handleCheckBillingStatus = async () => {
+    if (billingChecking) return;
+    const code = licenseCodeDraft.trim();
+    setBillingChecking(true);
+    try {
+      const result = await checkLicenseStatus(code);
+      await persist({
+        ...settings,
+        billing: {
+          licenseCode: code,
+          status: result.status,
+          expiresAt: result.expiresAt,
+          lastCheckedAt: Date.now(),
+        },
+      });
+      if (result.status === "admin") {
+        Alert.alert("確認できました", "管理者として全機能をご利用いただけます。");
+      } else if (result.status === "active") {
+        Alert.alert("確認できました", "有料プランが有効です。備え付けのAI・VOICEVOXがご利用いただけます。");
+      } else {
+        Alert.alert(
+          "未加入です",
+          "このコードでは有料プランが確認できませんでした。加入直後の場合は、反映まで数分かかることがあります。"
+        );
+      }
+    } catch (e) {
+      Alert.alert(
+        "確認できませんでした",
+        e instanceof BillingCheckError ? e.message : "しばらくしてから再度お試しください。"
+      );
+    } finally {
+      setBillingChecking(false);
+    }
+  };
+
+  const handleOpenSubscribePage = () => {
+    if (!isBillingConfigured()) {
+      Alert.alert(
+        "準備中です",
+        "有料プランの決済ページがまだ設定されていません(アプリ配布者による設定待ちです)。"
+      );
+      return;
+    }
+    Linking.openURL(buildSubscribeUrl(settings.billing.licenseCode));
+  };
+
+  const handleRegenerateLicenseCode = () => {
+    Alert.alert(
+      "新しいコードを発行しますか？",
+      "現在のコードで既に加入済みの場合、再度この操作を行うと状態確認ができなくなることがあります。通常は操作不要です。",
+      [
+        { text: "キャンセル", style: "cancel" },
+        {
+          text: "発行する",
+          onPress: () => {
+            const next = generateLicenseCode();
+            setLicenseCodeDraft(next);
+            persist({ ...settings, billing: { licenseCode: next, status: "unknown", expiresAt: null, lastCheckedAt: null } });
+          },
+        },
+      ]
+    );
+  };
+
   const onChangeCallUserAs = (v: string) => {
     update((d) => ({ ...d, persona: { ...d.persona, callUserAs: v } }));
   };
   const onBlurCallUserAs = () => persist(settings);
 
   const testVoice = () => {
-    speakText("こんにちは。この声でお話しします。", settings.voice, {
+    const voiceToUse =
+      settings.voice.provider === "voicevox" && !hasPaidAccess(settings.billing)
+        ? { ...settings.voice, provider: "system" as const }
+        : settings.voice;
+    speakText("こんにちは。この声でお話しします。", voiceToUse, {
       onError: () =>
         Alert.alert(
           "再生できませんでした",
@@ -431,6 +537,11 @@ export default function SettingsScreen() {
 
         {settings.voice.provider === "voicevox" ? (
           <>
+            {!hasPaidAccess(settings.billing) ? (
+              <Text style={styles.errorHelper}>
+                VOICEVOXは有料プランの方のみご利用いただけます。下の「利用プラン」から加入するか、管理者コードを入力してください(有効になるまでは端末内蔵ボイスで読み上げられます)。
+              </Text>
+            ) : null}
             <Text style={styles.smallHelper}>
               無料・オープンソースのVOICEVOX ENGINEを自分でホスティングし、そのURLを入力してください。スリープなしで場所を問わず使うための推奨構成(Oracle Cloud常時無料VM + HTTPS化)はREADMEを参照してください。
             </Text>
@@ -510,6 +621,65 @@ export default function SettingsScreen() {
         </View>
       </Section>
 
+      <Section title="利用プラン">
+        <Text style={styles.helper}>
+          「備え付けのAI」(共有プロキシ経由の対話AI)とVOICEVOX(端末にない読み上げボイス)は、有料プランへの加入、または管理者コードの入力が必要な機能です。「自分のAPIキーを使う」モードと端末/ブラウザ内蔵ボイスは、プラン状態に関わらず無料でお使いいただけます。
+        </Text>
+
+        <View style={styles.planBadge}>
+          <Text style={styles.planBadgeText}>
+            現在のプラン:{" "}
+            {settings.billing.status === "admin"
+              ? "管理者(全機能開放)"
+              : settings.billing.status === "active"
+              ? "有料プラン加入中"
+              : settings.billing.status === "checking"
+              ? "確認中…"
+              : "未加入"}
+          </Text>
+        </View>
+
+        {!isBillingConfigured() ? (
+          <Text style={styles.errorHelper}>
+            決済ページが未設定です(アプリ配布者による設定待ちです)。設定が完了するまでは有料機能はご利用いただけません。
+          </Text>
+        ) : null}
+
+        <Text style={styles.label}>あなたのコード</Text>
+        <TextInput
+          style={styles.input}
+          value={licenseCodeDraft}
+          onChangeText={onChangeLicenseCode}
+          onBlur={onBlurLicenseCode}
+          autoCapitalize="characters"
+          placeholder="例: KTLK-AB12-CD34"
+        />
+        <Text style={styles.smallHelper}>
+          購入時にこのコードで加入状況を識別します。管理者の方は、この欄に管理者コードを直接入力して「状態を確認」を押してください。
+        </Text>
+
+        <View style={styles.chipWrap}>
+          <Pressable style={styles.primaryButton} onPress={handleOpenSubscribePage}>
+            <Text style={styles.primaryButtonText}>💳 加入ページを開く</Text>
+          </Pressable>
+        </View>
+        <Pressable
+          style={[styles.secondaryButton, billingChecking && styles.primaryButtonDisabled]}
+          onPress={handleCheckBillingStatus}
+          disabled={billingChecking}
+        >
+          {billingChecking ? (
+            <ActivityIndicator size="small" color="#2F5BD9" />
+          ) : (
+            <Text style={styles.secondaryButtonText}>🔄 状態を確認</Text>
+          )}
+        </Pressable>
+
+        <Pressable onPress={handleRegenerateLicenseCode}>
+          <Text style={styles.linkText}>新しいコードを発行する</Text>
+        </Pressable>
+      </Section>
+
       <Section title="対話AIの接続設定">
         <Text style={styles.helper}>
           返答はストリーミング表示され、生成され次第すぐに読めます。
@@ -541,6 +711,10 @@ export default function SettingsScreen() {
             {!isSharedProxyConfigured() ? (
               <Text style={styles.errorHelper}>
                 共有プロキシが未設定です(アプリ配布者による設定待ちです)。設定が完了するまでは「自分のAPIキーを使う」をご利用ください。
+              </Text>
+            ) : !hasPaidAccess(settings.billing) ? (
+              <Text style={styles.errorHelper}>
+                備え付けのAIは有料プランの方のみご利用いただけます。上の「利用プラン」から加入するか、管理者コードを入力してください。
               </Text>
             ) : null}
 
@@ -703,6 +877,15 @@ const styles = StyleSheet.create({
   smallHelper: { fontSize: 11, color: "#8A8AA0", marginBottom: 10, lineHeight: 15 },
   errorHelper: { fontSize: 11, color: "#B3261E", marginBottom: 10, lineHeight: 15 },
   okHelper: { fontSize: 11, color: "#2F8F5B", marginTop: -4, marginBottom: 10 },
+  planBadge: {
+    alignSelf: "flex-start",
+    backgroundColor: "#EDEEF5",
+    borderRadius: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    marginBottom: 10,
+  },
+  planBadgeText: { fontSize: 12, fontWeight: "700", color: "#26263A" },
   quickSetupBox: {
     borderWidth: 1,
     borderColor: "#DCE4FF",

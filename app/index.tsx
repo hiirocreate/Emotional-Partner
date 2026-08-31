@@ -16,10 +16,20 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { ChatBubble } from "../components/ChatBubble";
 import { VoiceButton } from "../components/VoiceButton";
 import { streamAiReply, AiConfigError, AiRequestError } from "../lib/ai";
+import { hasPaidAccess } from "../lib/billing";
 import { loadHistory, loadSettings, saveHistory } from "../lib/storage";
 import { AppSettings, ChatMessage } from "../lib/types";
 import { useVoiceInput } from "../lib/voiceInput";
 import { speakText, stopSpeaking } from "../lib/voiceOutput";
+
+/** VOICEVOXの利用にはサブスク(または管理者コード)が必要なため、権利がない場合は端末内蔵ボイスへ自動フォールバックする */
+function speakWithGate(text: string, settings: AppSettings, callbacks?: Parameters<typeof speakText>[2]) {
+  if (settings.voice.provider === "voicevox" && !hasPaidAccess(settings.billing)) {
+    speakText(text, { ...settings.voice, provider: "system" }, callbacks);
+    return;
+  }
+  speakText(text, settings.voice, callbacks);
+}
 
 const APP_DISCLAIMER =
   "このアプリはテスト版のツールであり、医療行為・診断・治療の代わりにはなりません。";
@@ -79,6 +89,7 @@ export default function ChatScreen() {
         working,
         settings.persona,
         settings.ai,
+        settings.billing,
         (partial) => setStreamingText(partial)
       );
       activeStreamRef.current = { abort };
@@ -96,7 +107,7 @@ export default function ChatScreen() {
 
         const shouldSpeak = settings.voice.autoSpeak || inputMode === "voice";
         if (shouldSpeak) {
-          speakText(reply, settings.voice);
+          speakWithGate(reply, settings);
         }
       } catch (e) {
         if (e instanceof AiConfigError || e instanceof AiRequestError) {
@@ -173,7 +184,7 @@ export default function ChatScreen() {
             message={item}
             onSpeak={
               item.role === "assistant" && item.id !== "__streaming__"
-                ? (t) => speakText(t, settings.voice)
+                ? (t) => speakWithGate(t, settings)
                 : undefined
             }
           />

@@ -75,10 +75,31 @@ export interface AiProviderSettings {
   model: string;
 }
 
+/**
+ * 利用プラン(サブスクリプション)のステータス。
+ * - "unknown": まだ一度も確認していない
+ * - "checking": サーバーに問い合わせ中
+ * - "none": 未加入(有料機能は利用不可)
+ * - "active": 有料プラン加入中
+ * - "admin": 管理者コードによる無償の全機能開放
+ */
+export type LicenseStatus = "unknown" | "checking" | "none" | "active" | "admin";
+
+export interface BillingSettings {
+  /** この端末用に生成された識別コード。購入時の紐付けや管理者コード入力に使う */
+  licenseCode: string;
+  status: LicenseStatus;
+  /** サブスクの有効期限(UNIXミリ秒)。管理者/期限なしの場合はnull */
+  expiresAt: number | null;
+  /** 最後にサーバーへ状態確認した時刻(UNIXミリ秒) */
+  lastCheckedAt: number | null;
+}
+
 export interface AppSettings {
   persona: PersonaSettings;
   voice: VoiceSettings;
   ai: AiProviderSettings;
+  billing: BillingSettings;
   onboardingDone: boolean;
 }
 
@@ -106,6 +127,12 @@ export const DEFAULT_SETTINGS: AppSettings = {
     baseUrl: "",
     apiKey: "",
     model: "llama-3.1-8b-instant",
+  },
+  billing: {
+    licenseCode: "",
+    status: "unknown",
+    expiresAt: null,
+    lastCheckedAt: null,
   },
   onboardingDone: false,
 };

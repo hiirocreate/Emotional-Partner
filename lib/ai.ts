@@ -1,6 +1,7 @@
-import { AiProviderSettings, ChatMessage, PersonaSettings } from "./types";
+import { AiProviderSettings, BillingSettings, ChatMessage, PersonaSettings } from "./types";
 import { buildSystemPrompt } from "./personas";
 import { SHARED_PROXY_APP_SECRET, SHARED_PROXY_BASE_URL, isSharedProxyConfigured } from "./config";
+import { hasPaidAccess } from "./billing";
 
 export class AiConfigError extends Error {}
 export class AiRequestError extends Error {}
@@ -23,6 +24,7 @@ export function streamAiReply(
   history: ChatMessage[],
   persona: PersonaSettings,
   aiSettings: AiProviderSettings,
+  billing: BillingSettings,
   onDelta: (fullTextSoFar: string) => void
 ): { promise: Promise<string>; abort: () => void } {
   let xhr: XMLHttpRequest | undefined;
@@ -34,6 +36,14 @@ export function streamAiReply(
       reject(
         new AiConfigError(
           "共有プロキシが未設定です(アプリ配布者による設定待ちです)。設定画面から「自分のAPIキーを使う」に切り替えてください。"
+        )
+      );
+      return;
+    }
+    if (useProxy && !hasPaidAccess(billing)) {
+      reject(
+        new AiConfigError(
+          "備え付けのAI(共有プロキシ)は有料プランの方のみご利用いただけます。設定画面の「利用プラン」から加入するか、管理者コードを入力してください。"
         )
       );
       return;
@@ -74,6 +84,7 @@ export function streamAiReply(
     xhr.setRequestHeader("Content-Type", "application/json");
     if (useProxy) {
       xhr.setRequestHeader("X-App-Secret", SHARED_PROXY_APP_SECRET);
+      xhr.setRequestHeader("X-License-Code", billing.licenseCode || "");
     } else {
       xhr.setRequestHeader("Authorization", `Bearer ${aiSettings.apiKey}`);
     }
@@ -122,6 +133,12 @@ export function streamAiReply(
           reject(
             new AiRequestError(
               "共有プロキシの利用が混み合っています。少し時間をおいて再度お試しください。"
+            )
+          );
+        } else if (xhr.status === 402) {
+          reject(
+            new AiRequestError(
+              "備え付けのAI(共有プロキシ)は有料プランの方のみご利用いただけます。設定画面の「利用プラン」から加入するか、管理者コードを入力してください。"
             )
           );
         } else {

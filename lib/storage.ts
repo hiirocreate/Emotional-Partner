@@ -28,6 +28,7 @@ export async function loadSettings(): Promise<AppSettings> {
         },
       },
       ai: { ...DEFAULT_SETTINGS.ai, ...parsed.ai },
+      billing: { ...DEFAULT_SETTINGS.billing, ...parsed.billing },
     };
   } catch (e) {
     console.warn("設定の読み込みに失敗しました", e);

@@ -13,8 +13,9 @@
 - **ストリーミング応答**: AIの返答は生成され次第リアルタイムに画面へ表示されます。返答が全部揃うまで待つ必要がなく、体感速度が大きく向上します。
 - **読み上げボイスを選択式で切り替え**: 「端末/ブラウザ内蔵ボイス」と「VOICEVOX（無料の日本語キャラクターボイスエンジン）」の2系統から選べます。声質・キャラクター性を重視するならVOICEVOXがおすすめです（セットアップ方法は下記）。
 - **AIの立場（ペルソナ）をユーザーごとに設定可能**: 「友だちのように」「兄・姉のように」「傾聴カウンセラーのように」などのプリセットに加え、自由記述でオリジナルの立場を設定できます。
-- **AI連携はAPIキー入力なしですぐ使える**: 開発者が用意した共有プロキシ経由で対話AIに接続する設計のため、利用者は各自でAPIキーを発行・入力する必要がありません。
-- **自分専用のAPI連携もワンタップで設定可能**: 共有プロキシが混み合う場合や自分専用の環境で使いたい場合は、「自分のAPIキーを使う」に切り替えた上で、[OpenRouter](https://openrouter.ai)ならログインボタン一つでAPIキーの発行・入力なしに接続できます（OAuthログイン）。Groqの場合もキー作成ページを直接開くボタンとクリップボード貼り付けボタンで、コピー＆ペーストの手間だけで済みます。
+- **AI連携はAPIキー入力なしですぐ使える**: 開発者が用意した共有プロキシ経由で対話AIに接続する設計のため、利用者は各自でAPIキーを発行・入力する必要がありません（有料プラン加入者向け機能。詳細は下記）。
+- **自分専用のAPI連携もワンタップで設定可能**: 共有プロキシを使わず自分専用の環境で使いたい場合は、「自分のAPIキーを使う」に切り替えた上で、[OpenRouter](https://openrouter.ai)ならログインボタン一つでAPIキーの発行・入力なしに接続できます（OAuthログイン）。Groqの場合もキー作成ページを直接開くボタンとクリップボード貼り付けボタンで、コピー＆ペーストの手間だけで済みます。こちらは有料プランに関係なく無料でお使いいただけます。
+- **有料プラン(サブスクリプション)と管理者コード**: 「備え付けのAI」(共有プロキシ)とVOICEVOX(端末にない読み上げボイス)は有料プラン加入者向けの機能です。Stripeでの決済リンクにより継続課金を受け付けられます。アプリ配布者(管理者)は管理者コードを設定画面に入力することで、課金なしで全機能を使えます。「自分のAPIキーを使う」モードと端末内蔵ボイスはプランに関係なく無料です。
 
 ## 相談窓口の案内について（設計方針）
 
@@ -32,6 +33,7 @@
 | 音声合成 (TTS) ②VOICEVOX | [VOICEVOX ENGINE](https://github.com/VOICEVOX/voicevox_engine)（OSS）を [Oracle Cloud Always Free](https://www.oracle.com/cloud/free/) VM上でDocker常時稼働 + Caddyで自動HTTPS化 | 無料（Always Free枠、期間の定めなし） |
 | 対話生成AI (LLM) 中継 | [Cloudflare Workers](https://workers.cloudflare.com/)（`proxy-worker/`）で共有プロキシを構築し、開発者のAPIキーを1箇所に集約 | 無料枠（1日10万リクエストまで） |
 | 対話生成AI (LLM) 本体 | デフォルトは [Groq](https://console.groq.com)（無料枠あり・高速）。プロキシを介さず [OpenRouter](https://openrouter.ai) 等の無料モデルへ直接切替も可 | 無料枠あり |
+| 課金(サブスクリプション) | [Stripe](https://stripe.com) の決済リンク(Payment Link)。サブスク状態はCloudflare Workers KVで管理 | 月額固定費なし(決済額に応じた手数料のみ) |
 | データ保存 | 端末内 `AsyncStorage`（サーバー不要） | 無料 |
 | APKビルド・Web公開 | GitHub Actions + GitHub Pages | 無料枠あり |
 
@@ -78,6 +80,12 @@ npm start
 - **精度重視**: `llama-3.3-70b-versatile`（応答はやや遅くなりますが、文脈理解や表現力が向上）
 
 Groqは無料枠の対象モデルが変更されることがあります。うまく繋がらない場合は [console.groq.com/docs/models](https://console.groq.com/docs/models) で現在利用可能なモデルIDを確認し、`proxy-worker/src/index.js` の `ALLOWED_MODELS` と `app/settings.tsx` の `PROXY_MODEL_PRESETS` を書き換えてください。
+
+#### 有料プラン(サブスクリプション)を設定する場合
+
+「備え付けのAI」とVOICEVOXは有料プラン加入者向けの機能として実装されています。Stripeでの決済リンクの作成、Cloudflare Workers KVでのサブスク状態管理、管理者コードの設定などの手順は **[proxy-worker/README.md](./proxy-worker/README.md)** の「有料プラン(サブスクリプション)をセットアップする」の章にまとめています。
+
+この設定を行わない場合でも、管理者コード(`ADMIN_CODE`)だけ設定しておけば、あなた自身は課金なしで全機能を使えます。他の利用者への課金導線が不要な場合は、Stripe連携そのものを省略しても構いません。
 
 #### プロキシを使わず、自分のAPIキーで直接使いたい場合
 
@@ -169,6 +177,7 @@ lib/                  ロジック(UIに依存しない部分)
   storage.ts             設定・会話履歴の端末内保存
   personas.ts            AIの立場プリセットとシステムプロンプト生成
   ai.ts                    対話生成AI(LLM)へのストリーミング問い合わせ(共有プロキシ/自分のAPIキー)
+  billing.ts               有料プラン(サブスクリプション)の状態確認・決済導線
   openrouterOAuth.ts       OpenRouterのOAuth(PKCE)連携。個別APIキーをログインだけで取得
   voiceInput.ts           音声入力(STT)の抽象化フック
   voiceOutput.ts          音声合成(TTS)の抽象化(端末内蔵/VOICEVOX)
