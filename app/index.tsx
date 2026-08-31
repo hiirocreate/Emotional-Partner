@@ -10,7 +10,7 @@ import {
   TextInput,
   View,
 } from "react-native";
-import { useRouter } from "expo-router";
+import { useFocusEffect, useRouter } from "expo-router";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { ChatBubble } from "../components/ChatBubble";
@@ -60,6 +60,16 @@ export default function ChatScreen() {
       activeStreamRef.current?.abort();
     };
   }, []);
+
+  // チャット画面は最初の1回しかマウントされない(設定画面から戻ってきても
+  // アンマウントされない)ため、通常のuseEffectだけでは設定画面での変更
+  // (プラン状態の確認結果、AI/VOICEVOX設定など)がチャット画面に反映されない。
+  // 画面にフォーカスが戻るたびに設定を読み直すことで同期させる。
+  useFocusEffect(
+    useCallback(() => {
+      loadSettings().then(setSettings);
+    }, [])
+  );
 
   const persistMessages = useCallback((next: ChatMessage[]) => {
     setMessages(next);
