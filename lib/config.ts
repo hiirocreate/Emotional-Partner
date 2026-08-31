@@ -45,3 +45,20 @@ export const BILLING_SUBSCRIBE_URL = "https://buy.stripe.com/test_fZufZhaZu0dHbC
 export function isBillingConfigured(): boolean {
   return Boolean(BILLING_SUBSCRIBE_URL);
 }
+
+
+/**
+ * アプリ配布者(開発者)が管理する共有VOICEVOXサーバーのURL。
+ *
+ * 「備え付けのAI」と同じ考え方で、有料プラン加入者(または管理者)が
+ * 自分でVOICEVOXサーバーを用意しなくても使えるようにするための仕組み。
+ * 有料プラン加入者(または管理者)が設定画面でVOICEVOXへの接続先を
+ * まだ何も設定していない場合、このURLへ自動的に接続されます。
+ * (自分専用のVOICEVOXサーバーを使いたい人は、設定画面で個別に上書きできます)
+ */
+export const SHARED_VOICEVOX_URL = "https://8.235.85.246.nip.io";
+
+/** 共有VOICEVOXサーバーが設定済みかどうか */
+export function isSharedVoicevoxConfigured(): boolean {
+  return Boolean(SHARED_VOICEVOX_URL);
+}
