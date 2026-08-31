@@ -11,7 +11,7 @@
  */
 
 /** Cloudflare Workersのデプロイ先URL。例: https://kokorotalk-proxy.your-name.workers.dev/v1 */
-export const SHARED_PROXY_BASE_URL = "";
+export const SHARED_PROXY_BASE_URL = "https://kokorotalk-proxy.h-onoue-test.workers.dev/v1";
 
 /**
  * プロキシへのアクセスを軽くゲートするための共有シークレット。
@@ -24,7 +24,8 @@ export const SHARED_PROXY_BASE_URL = "";
  * 悪用が心配な場合は、後述のレート制限(Cloudflare Workers Rate Limiting)を
  * あわせて設定してください。
  */
-export const SHARED_PROXY_APP_SECRET = "";
+export const SHARED_PROXY_APP_SECRET = "kokorononakahanozokenai
+";
 
 /** 共有プロキシが利用可能かどうか(値が設定されているか)を返す */
 export function isSharedProxyConfigured(): boolean {
