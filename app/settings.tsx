@@ -33,11 +33,9 @@ import {
 } from "../lib/billing";
 import { clearHistory, loadSettings, saveSettings } from "../lib/storage";
 import {
-  BASE_COLOR_SWATCHES,
-  BUTTON_COLOR_SWATCHES,
+  COLOR_SWATCHES,
   DEFAULT_THEME_COLORS,
   resolveThemeColors,
-  TEXT_COLOR_SWATCHES,
   THEME_PRESET_LIST,
 } from "../lib/theme";
 import {
@@ -925,19 +923,19 @@ export default function SettingsScreen() {
             <ColorSwatchPicker
               value={customColorDraft.baseColor}
               onChange={(hex) => onPickCustomColor("baseColor", hex)}
-              swatches={BASE_COLOR_SWATCHES}
+              swatches={COLOR_SWATCHES}
             />
             <Text style={[styles.label, { marginTop: 14 }]}>ボタンカラー</Text>
             <ColorSwatchPicker
               value={customColorDraft.buttonColor}
               onChange={(hex) => onPickCustomColor("buttonColor", hex)}
-              swatches={BUTTON_COLOR_SWATCHES}
+              swatches={COLOR_SWATCHES}
             />
             <Text style={[styles.label, { marginTop: 14 }]}>テキストカラー</Text>
             <ColorSwatchPicker
               value={customColorDraft.textColor}
               onChange={(hex) => onPickCustomColor("textColor", hex)}
-              swatches={TEXT_COLOR_SWATCHES}
+              swatches={COLOR_SWATCHES}
             />
 
             <View style={styles.themePreviewRow}>
