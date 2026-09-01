@@ -20,6 +20,23 @@ import { VoiceOption, VoiceSettings } from "./types";
  *   サーバーのホスティングが一切不要な代わりに、キャラクターボイスではなく
  *   自然な読み上げ音声(Neural2等)が中心になる。無料枠が大きく、個人利用なら
  *   実質無料で使える(README参照)。
+ *
+ * ["voicevox"/"google"の速度対策]
+ * クラウド合成(VOICEVOX/Google)は「テキスト送信→音声データ取得」のHTTP往復が
+ * どうしても発生し、モバイル回線や非力な自前サーバー(GCP無料枠など)では
+ * この往復だけで数百ms〜数秒かかることがある。文単位でキューに積んで
+ * 逐次再生する仕組み(enqueueSpeech)自体は既にあったが、以前は
+ * 「今の文の再生が終わってから次の文の合成をリクエストする」という
+ * 完全な直列処理だったため、往復のたびに無音の間が空いてしまっていた。
+ * これを解消するため、
+ *   1. enqueueSpeech() に積んだ瞬間から(再生の順番を待たずに)音声合成の
+ *      HTTPリクエストを先読みで開始しておく(prefetch)。再生中に次の文の
+ *      合成が裏で進むので、前の文が終わる頃には次の音声データが
+ *      既に手元にある状態になる。
+ *   2. 再生用のAudioPlayerインスタンスを文ごとに作り直さず、1つを使い回して
+ *      replace()で音源だけ差し替える。ネイティブ(スマホ)ではプレイヤーの
+ *      生成・破棄のたびにOS側のオーディオセッション初期化コストがかかり、
+ *      これが文の切れ目ごとの体感の「間」として効いていたため。
  */
 
 function isWeb() {
@@ -142,7 +159,9 @@ export interface SpeakCallbacks {
   onError?: () => void;
 }
 
-let currentCloudPlayer: AudioPlayer | null = null;
+function needsCloudSynthesis(voice: VoiceSettings): boolean {
+  return voice.provider === "voicevox" || voice.provider === "google";
+}
 
 /**
  * settings.voice の内容に従って読み上げを実行する(即座に、直前の再生を中断して)。
@@ -160,42 +179,38 @@ export function speakText(
 }
 
 function dispatchSpeak(text: string, voice: VoiceSettings, callbacks: SpeakCallbacks) {
-  if (voice.provider === "voicevox") {
-    const { baseUrl, speakerId } = voice.voicevox;
-    if (!baseUrl || speakerId == null) {
-      console.warn("VOICEVOXの接続先または話者が未設定です");
-      callbacks.onError?.();
-      return;
-    }
-    speakWithVoicevox(text, baseUrl, speakerId, voice.rate, voice.pitch, callbacks);
-    return;
-  }
-
-  if (voice.provider === "google") {
-    const { apiKey, voiceName } = voice.google;
-    if (!apiKey || !voiceName) {
-      console.warn("Google Cloud TTSのAPIキーまたは音声が未設定です");
-      callbacks.onError?.();
-      return;
-    }
-    speakWithGoogleTts(text, apiKey, voiceName, voice.rate, voice.pitch, callbacks);
+  if (needsCloudSynthesis(voice)) {
+    synthesizeCloudAudio(text, voice)
+      .then((audio) => playAudioArrayBuffer(audio.arrayBuffer, audio.mimeType, audio.fileExt, callbacks))
+      .catch((e) => {
+        console.warn("読み上げに失敗しました", e);
+        callbacks.onError?.();
+      });
     return;
   }
 
   speakWithSystemVoice(text, voice.selectedVoiceId, voice.rate, voice.pitch, callbacks);
 }
 
+interface SynthesizedAudio {
+  arrayBuffer: ArrayBuffer;
+  mimeType: string;
+  fileExt: string;
+}
+
 interface QueueItem {
   text: string;
   voice: VoiceSettings;
   callbacks: SpeakCallbacks;
+  /** クラウド合成が必要な場合、キュー追加と同時に開始しておく先読みリクエスト(失敗時はnullに解決する) */
+  synthesis: Promise<SynthesizedAudio | null> | null;
 }
 
 let speechQueue: QueueItem[] = [];
 let isProcessingQueue = false;
 // stopSpeaking()のたびに世代を進める。再生中の項目が強制停止された場合、
-// dispatchSpeak側のonDone/onErrorが呼ばれないまま宙に浮くことがあるため、
-// 世代が変わっていたらそのまま処理チェーンを打ち切ってキューの停止漏れを防ぐ。
+// 先読み中の合成待ちや再生待ちをこの世代番号でまとめて打ち切り、
+// キューの停止漏れを防ぐ。
 let queueGeneration = 0;
 
 /**
@@ -205,6 +220,12 @@ let queueGeneration = 0;
  * (特に精度重視モデルでは)無音の待ち時間が長く感じられる。文の区切り(。！？や改行)が
  * 来るたびにこの関数で追加していくと、既存の読み上げの再生が終わり次第すぐ次の文が
  * 再生されるため、体感の応答速度が大きく改善する。
+ *
+ * さらに、クラウド音声(VOICEVOX/Google)の合成リクエストは、再生の順番を待たずに
+ * キュー追加と同時に(裏で)開始する。前の文が再生されている間に次の文の合成が
+ * 進むため、文の切れ替わりで無音になりにくい(特に回線が細いスマホや、
+ * 非力な自前VOICEVOXサーバーで効果が大きい)。
+ *
  * `speakText` と違い、既存の再生や既にキューにある分は中断しない。
  */
 export function enqueueSpeech(
@@ -213,7 +234,13 @@ export function enqueueSpeech(
   callbacks: SpeakCallbacks = {}
 ): void {
   if (!text.trim()) return;
-  speechQueue.push({ text, voice, callbacks });
+  const synthesis = needsCloudSynthesis(voice)
+    ? synthesizeCloudAudio(text, voice).catch((e) => {
+        console.warn("音声合成の先読みに失敗しました", e);
+        return null;
+      })
+    : null;
+  speechQueue.push({ text, voice, callbacks, synthesis });
   if (!isProcessingQueue) {
     processSpeechQueue(queueGeneration);
   }
@@ -231,20 +258,32 @@ async function processSpeechQueue(generation: number): Promise<void> {
     return;
   }
   isProcessingQueue = true;
-  await new Promise<void>((resolve) => {
-    dispatchSpeak(item.text, item.voice, {
-      onDone: () => {
-        item.callbacks.onDone?.();
-        resolve();
-      },
-      onError: () => {
-        item.callbacks.onError?.();
-        resolve();
-      },
+
+  if (item.synthesis) {
+    const audio = await item.synthesis;
+    if (generation !== queueGeneration) return; // 待っている間にstopSpeaking()で打ち切られた
+    if (!audio) {
+      item.callbacks.onError?.();
+    } else {
+      await playAudioArrayBuffer(audio.arrayBuffer, audio.mimeType, audio.fileExt, item.callbacks);
+    }
+  } else {
+    await new Promise<void>((resolve) => {
+      speakWithSystemVoice(item.text, item.voice.selectedVoiceId, item.voice.rate, item.voice.pitch, {
+        onDone: () => {
+          item.callbacks.onDone?.();
+          resolve();
+        },
+        onError: () => {
+          item.callbacks.onError?.();
+          resolve();
+        },
+      });
     });
-  });
+  }
+
   if (generation !== queueGeneration) {
-    // この間にstopSpeaking()で打ち切られていたら、ここで処理チェーンを終える
+    // 再生中にstopSpeaking()で打ち切られていたら、ここで処理チェーンを終える
     return;
   }
   processSpeechQueue(generation);
@@ -308,88 +347,117 @@ function speakWithSystemVoice(
   });
 }
 
-async function speakWithVoicevox(
+/** voice.provider に応じてVOICEVOX/Google Cloud TTSの音声データを取得する(再生はしない)。 */
+async function synthesizeCloudAudio(text: string, voice: VoiceSettings): Promise<SynthesizedAudio> {
+  if (voice.provider === "voicevox") {
+    const { baseUrl, speakerId } = voice.voicevox;
+    if (!baseUrl || speakerId == null) {
+      throw new Error("VOICEVOXの接続先または話者が未設定です");
+    }
+    return synthesizeVoicevox(text, baseUrl, speakerId, voice.rate, voice.pitch);
+  }
+
+  const { apiKey, voiceName } = voice.google;
+  if (!apiKey || !voiceName) {
+    throw new Error("Google Cloud TTSのAPIキーまたは音声が未設定です");
+  }
+  return synthesizeGoogleTts(text, apiKey, voiceName, voice.rate, voice.pitch);
+}
+
+async function synthesizeVoicevox(
   text: string,
   baseUrl: string,
   speakerId: number,
   rate: number,
-  pitch: number,
-  callbacks: SpeakCallbacks
-) {
-  try {
-    const base = baseUrl.trim().replace(/\/+$/, "");
-    const queryRes = await fetch(
-      `${base}/audio_query?speaker=${speakerId}&text=${encodeURIComponent(text)}`,
-      { method: "POST" }
-    );
-    if (!queryRes.ok) {
-      throw new Error(`音声パラメータの生成に失敗しました (HTTP ${queryRes.status})`);
-    }
-    const audioQuery = await queryRes.json();
-    // アプリの「速さ/高さ」スライダーをVOICEVOXのパラメータ範囲にゆるく対応させる
-    audioQuery.speedScale = clamp(rate, 0.5, 2.0);
-    audioQuery.pitchScale = clamp((pitch - 1) * 0.3, -0.15, 0.15);
-
-    const synthRes = await fetch(`${base}/synthesis?speaker=${speakerId}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(audioQuery),
-    });
-    if (!synthRes.ok) {
-      throw new Error(`音声合成に失敗しました (HTTP ${synthRes.status})`);
-    }
-    const arrayBuffer = await synthRes.arrayBuffer();
-    await playAudioArrayBuffer(arrayBuffer, "audio/wav", "wav", callbacks);
-  } catch (e) {
-    console.warn("VOICEVOXでの読み上げに失敗しました", e);
-    callbacks.onError?.();
+  pitch: number
+): Promise<SynthesizedAudio> {
+  const base = baseUrl.trim().replace(/\/+$/, "");
+  const queryRes = await fetch(
+    `${base}/audio_query?speaker=${speakerId}&text=${encodeURIComponent(text)}`,
+    { method: "POST" }
+  );
+  if (!queryRes.ok) {
+    throw new Error(`音声パラメータの生成に失敗しました (HTTP ${queryRes.status})`);
   }
+  const audioQuery = await queryRes.json();
+  // アプリの「速さ/高さ」スライダーをVOICEVOXのパラメータ範囲にゆるく対応させる
+  audioQuery.speedScale = clamp(rate, 0.5, 2.0);
+  audioQuery.pitchScale = clamp((pitch - 1) * 0.3, -0.15, 0.15);
+
+  const synthRes = await fetch(`${base}/synthesis?speaker=${speakerId}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(audioQuery),
+  });
+  if (!synthRes.ok) {
+    throw new Error(`音声合成に失敗しました (HTTP ${synthRes.status})`);
+  }
+  const arrayBuffer = await synthRes.arrayBuffer();
+  return { arrayBuffer, mimeType: "audio/wav", fileExt: "wav" };
 }
 
 /**
- * Google Cloud Text-to-Speech APIの `/v1/text:synthesize` を呼び出して読み上げる。
+ * Google Cloud Text-to-Speech APIの `/v1/text:synthesize` を呼び出す。
  * https://cloud.google.com/text-to-speech/docs/reference/rest/v1/text/synthesize
  */
-async function speakWithGoogleTts(
+async function synthesizeGoogleTts(
   text: string,
   apiKey: string,
   voiceName: string,
   rate: number,
-  pitch: number,
-  callbacks: SpeakCallbacks
-) {
-  try {
-    const res = await fetch(
-      `https://texttospeech.googleapis.com/v1/text:synthesize?key=${encodeURIComponent(apiKey.trim())}`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          input: { text },
-          voice: { languageCode: "ja-JP", name: voiceName },
-          audioConfig: {
-            audioEncoding: "MP3",
-            // アプリの「速さ」スライダー(0.5〜1.8)はGoogleの許容範囲(0.25〜4.0)にそのまま収まる
-            speakingRate: clamp(rate, 0.25, 4.0),
-            // アプリの「高さ」スライダー(0.5〜1.8、基準1.0)をGoogleの半音単位(-20.0〜20.0)へゆるく対応させる
-            pitch: clamp((pitch - 1) * 8, -20, 20),
-          },
-        }),
-      }
-    );
-    if (!res.ok) {
-      throw new Error(`音声合成に失敗しました (HTTP ${res.status})`);
+  pitch: number
+): Promise<SynthesizedAudio> {
+  const res = await fetch(
+    `https://texttospeech.googleapis.com/v1/text:synthesize?key=${encodeURIComponent(apiKey.trim())}`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        input: { text },
+        voice: { languageCode: "ja-JP", name: voiceName },
+        audioConfig: {
+          audioEncoding: "MP3",
+          // アプリの「速さ」スライダー(0.5〜1.8)はGoogleの許容範囲(0.25〜4.0)にそのまま収まる
+          speakingRate: clamp(rate, 0.25, 4.0),
+          // アプリの「高さ」スライダー(0.5〜1.8、基準1.0)をGoogleの半音単位(-20.0〜20.0)へゆるく対応させる
+          pitch: clamp((pitch - 1) * 8, -20, 20),
+        },
+      }),
     }
-    const data: { audioContent?: string } = await res.json();
-    if (!data.audioContent) {
-      throw new Error("音声データを取得できませんでした");
-    }
-    const bytes = base64ToBytes(data.audioContent);
-    await playAudioArrayBuffer(bytes.buffer as ArrayBuffer, "audio/mpeg", "mp3", callbacks);
-  } catch (e) {
-    console.warn("Google Cloud TTSでの読み上げに失敗しました", e);
-    callbacks.onError?.();
+  );
+  if (!res.ok) {
+    throw new Error(`音声合成に失敗しました (HTTP ${res.status})`);
   }
+  const data: { audioContent?: string } = await res.json();
+  if (!data.audioContent) {
+    throw new Error("音声データを取得できませんでした");
+  }
+  const bytes = base64ToBytes(data.audioContent);
+  return { arrayBuffer: bytes.buffer as ArrayBuffer, mimeType: "audio/mpeg", fileExt: "mp3" };
+}
+
+// 文の切り替わりごとにAudioPlayerを生成・破棄すると、特にネイティブ(スマホ)では
+// OS側のオーディオセッション初期化コストが毎回かかり、無音の「間」として体感される。
+// 1つのプレイヤーを使い回し、replace()で音源だけ差し替えることでこれを避ける。
+let sharedPlayer: AudioPlayer | null = null;
+// 現在の再生が「自然に最後まで再生し終わったか(true)」「stopSpeaking()等で
+// 途中で打ち切られたか(false)」を呼び出し元に伝えるための解決関数。
+let resolveActivePlayback: ((finishedNaturally: boolean) => void) | null = null;
+
+function ensureSharedPlayer(source: string): AudioPlayer {
+  if (sharedPlayer) {
+    sharedPlayer.replace(source);
+    return sharedPlayer;
+  }
+  const player = createAudioPlayer(source);
+  player.addListener("playbackStatusUpdate", (status) => {
+    if (status.didJustFinish) {
+      resolveActivePlayback?.(true);
+      resolveActivePlayback = null;
+    }
+  });
+  sharedPlayer = player;
+  return player;
 }
 
 async function playAudioArrayBuffer(
@@ -398,59 +466,40 @@ async function playAudioArrayBuffer(
   fileExt: string,
   callbacks: SpeakCallbacks
 ) {
-  if (isWeb()) {
-    // expo-file-system はWeb版では機能しない(スタブ実装)ため、
-    // ブラウザ標準のBlob URLを使って再生する。
-    try {
+  try {
+    let source: string;
+    let cleanup: (() => void) | null = null;
+
+    if (isWeb()) {
+      // expo-file-system はWeb版では機能しない(スタブ実装)ため、
+      // ブラウザ標準のBlob URLを使って再生する。
       const blob = new Blob([arrayBuffer], { type: mimeType });
       const url = URL.createObjectURL(blob);
-      const player = createAudioPlayer(url);
-      currentCloudPlayer = player;
-      const cleanup = () => {
-        subscription.remove();
-        player.remove();
-        if (currentCloudPlayer === player) currentCloudPlayer = null;
-        URL.revokeObjectURL(url);
-      };
-      const subscription = player.addListener("playbackStatusUpdate", (status) => {
-        if (status.didJustFinish) {
-          cleanup();
-          callbacks.onDone?.();
-        }
-      });
-      player.play();
-    } catch (e) {
-      console.warn("音声の再生に失敗しました", e);
-      callbacks.onError?.();
-    }
-    return;
-  }
-
-  try {
-    const bytes = new Uint8Array(arrayBuffer);
-    const file = new File(Paths.cache, `kokorotalk-tts-${Date.now()}.${fileExt}`);
-    if (file.exists) {
-      file.delete();
-    }
-    file.create({ overwrite: true });
-    file.write(bytes);
-
-    const player = createAudioPlayer(file.uri);
-    currentCloudPlayer = player;
-    const subscription = player.addListener("playbackStatusUpdate", (status) => {
-      if (status.didJustFinish) {
-        subscription.remove();
-        player.remove();
-        if (currentCloudPlayer === player) currentCloudPlayer = null;
-        try {
-          file.delete();
-        } catch {
-          // 一時ファイルの削除失敗は無視して良い
-        }
-        callbacks.onDone?.();
+      source = url;
+      cleanup = () => URL.revokeObjectURL(url);
+    } else {
+      // 文ごとに新しいファイル名で書き出すと生成・削除の回数が増えるため、
+      // 拡張子ごとに固定名を使い回す(直列再生なので競合しない)。
+      const file = new File(Paths.cache, `kokorotalk-tts-playback.${fileExt}`);
+      if (file.exists) {
+        file.delete();
       }
+      file.create({ overwrite: true });
+      file.write(new Uint8Array(arrayBuffer));
+      source = file.uri;
+    }
+
+    const player = ensureSharedPlayer(source);
+    const finishedNaturally = await new Promise<boolean>((resolve) => {
+      resolveActivePlayback = resolve;
+      player.play();
     });
-    player.play();
+    cleanup?.();
+
+    if (finishedNaturally) {
+      callbacks.onDone?.();
+    }
+    // 途中で打ち切られた場合は、stopSpeaking()側で完結しているのでコールバックは呼ばない
   } catch (e) {
     console.warn("音声の再生に失敗しました", e);
     callbacks.onError?.();
@@ -465,14 +514,18 @@ export function stopSpeaking() {
   clearSpeechQueue();
   queueGeneration++;
   isProcessingQueue = false;
-  if (currentCloudPlayer) {
+
+  if (resolveActivePlayback) {
+    const resolve = resolveActivePlayback;
+    resolveActivePlayback = null;
+    resolve(false);
+  }
+  if (sharedPlayer) {
     try {
-      currentCloudPlayer.pause();
-      currentCloudPlayer.remove();
+      sharedPlayer.pause();
     } catch {
       // no-op
     }
-    currentCloudPlayer = null;
   }
 
   if (isWeb()) {
