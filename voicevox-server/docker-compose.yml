@@ -11,6 +11,12 @@ services:
   voicevox:
     image: voicevox/voicevox_engine:cpu-latest
     restart: always
+    # デフォルトはlocalhost等からのアクセスのみ許可(CORS)。
+    # アプリ(Web版)は別オリジンから接続するため、全オリジン許可にする。
+    # (commandを上書きすると元のコマンド全体が消えるため、デフォルト分もすべて明示する)
+    # --cpu_num_threads: 未指定だと論理コア数の半分(e2-microだと1スレッド)しか使わない。
+    # e2-microはvCPU2基(バースト時のみ)なので、明示的に2を指定してバースト時に使い切れるようにする。
+    command: ["gosu", "user", "/opt/voicevox_engine/run", "--host", "0.0.0.0", "--cors_policy_mode", "all", "--cpu_num_threads", "2"]
     expose:
       - "50021"
 
