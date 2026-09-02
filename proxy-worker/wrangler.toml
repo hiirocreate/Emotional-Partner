@@ -5,7 +5,7 @@ compatibility_date = "2026-08-01"
 # 有料プラン(サブスクリプション)の状態を保存するKVストア。
 # `npx wrangler kv namespace create SUBSCRIBERS` を実行し、表示された id を
 # 下の "REPLACE_WITH_KV_ID" に書き換えてください。サブスク機能を使わない場合は
-# このブロックごと削除してデプロイしても構いません(その場合、管理者コード以外は
+# このブロックごと削除してデプロイしても構いません(その場合、管理者以外は
 # 常に「未加入」として扱われます)。
 [[kv_namespaces]]
 binding = "SUBSCRIBERS"

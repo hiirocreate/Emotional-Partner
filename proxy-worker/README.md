@@ -58,7 +58,7 @@ curl -N https://kokorotalk-proxy.<あなたのサブドメイン>.workers.dev/v1
   -H "Content-Type: application/json" \
   -H "X-App-Secret: <手順3で決めた共有シークレット>" \
   -d '{
-    "model": "llama-3.1-8b-instant",
+    "model": "openai/gpt-oss-20b",
     "messages": [{"role":"user","content":"こんにちは"}],
     "stream": true
   }'
@@ -68,19 +68,21 @@ curl -N https://kokorotalk-proxy.<あなたのサブドメイン>.workers.dev/v1
 
 ## 有料プラン(サブスクリプション)をセットアップする(任意)
 
-「備え付けのAI」(この共有プロキシ経由の対話AI)と、アプリのVOICEVOX(端末にない読み上げボイス)機能は、有料プラン加入者だけが使える仕様になっています。管理者(あなた)自身は「管理者コード」を使うことで、課金なしで全機能を使えます。
+「備え付けのAI」(この共有プロキシ経由の対話AI)と、アプリのVOICEVOX(端末にない読み上げボイス)機能は、有料プラン加入者だけが使える仕様になっています。管理者(あなた)自身は「管理者メールアドレス」を登録しておくことで、課金なしで全機能を使えます。
 
-この機能を使わず、誰でも無料で共有プロキシを使えるようにしたい場合は、このセクションはスキップして構いません(その場合、後述の管理者コードだけ設定しておけば、あなた自身は問題なく使えます。他の利用者は「自分のAPIキーを使う」モードのみ無料で使える形になります)。
+**この機能を使うには、先にメインのREADME「7. Googleアカウントで会話ログ・AIの記憶を引き継ぐ」のGoogle Cloud Console設定(特にWeb用OAuthクライアント)を済ませておく必要があります。** 課金・管理者判定は「誰であるか」をGoogleアカウントのメールアドレスで確認する方式になっており、その確認にそのOAuthクライアントを使うためです(以前のバージョンにあった「端末ごとのランダムなコード」方式は廃止しました)。
+
+この機能を使わず、誰でも無料で共有プロキシを使えるようにしたい場合は、このセクションはスキップして構いません(その場合、後述の管理者メールアドレスだけ設定しておけば、あなた自身は問題なく使えます。他の利用者は「自分のAPIキーを使う」モードのみ無料で使える形になります)。
 
 ### 全体の仕組み
 
-1. アプリの各端末には、初回起動時に固有の「コード」が自動生成される(設定画面に表示)。
-2. 利用者はこのコードを持って、あなたが用意したStripeの決済リンク(Payment Link)で決済する。決済時、このコードが `client_reference_id` としてStripe側に記録される。
-3. 決済完了・更新・解約のたびに、StripeからこのWorkerへWebhook通知が届き、Cloudflare Workers KVにサブスク状態(有効/無効)が記録される。
-4. アプリは設定画面の「状態を確認」ボタンで、そのコードのサブスク状態をこのWorkerに問い合わせる。
-5. 「備え付けのAI」を使うリクエストにも同じコードが添付され、Worker側で有効なサブスク(または管理者コード)かどうかを毎回チェックする。
+1. 利用者はアプリでGoogleアカウント連携する(メインREADME「7.」)。
+2. 設定画面の「利用プラン」から「加入する」を押すと、その連携済みGoogleアカウントのメールアドレスが自動で入力された状態で、あなたが用意したStripeの決済リンク(Payment Link)が開く。
+3. 決済完了・更新・解約のたびに、StripeからこのWorkerへWebhook通知が届き、Cloudflare Workers KVに「そのメールアドレスのサブスク状態(有効/無効)」が記録される。
+4. アプリは設定画面の「状態を確認」ボタンを押すと、Googleサインインで得られる「IDトークン」(そのGoogleアカウント本人であることをGoogle自身が署名で証明する、電子的な身分証のようなもの)をこのWorkerに送る。Worker側でその署名をGoogleの公開鍵と照合し、確かに本人のものだと確認できた場合だけ、そのメールアドレスのサブスク状態を返す。
+5. 「備え付けのAI」を使うリクエストにも同じIDトークンが添付され、Worker側で毎回同じ検証をした上でサブスク中/管理者かどうかをチェックする。
 
-決済処理そのものはStripeに任せているため、このアプリ・Worker側では実際のクレジットカード情報等は一切扱いません。
+この「署名の検証」により、他人(特に管理者)のメールアドレスを自己申告するだけではなりすませない仕組みになっています(`src/googleIdToken.js`、検証ロジックのテストは `test-jwt-verify.mjs` を参照)。決済処理そのものはStripeに任せているため、このアプリ・Worker側では実際のクレジットカード情報等は一切扱いません。
 
 ### 手順
 
@@ -93,24 +95,33 @@ npx wrangler kv namespace create SUBSCRIBERS
 
 表示された `id = "xxxxxxxx..."` を、`wrangler.toml` の `[[kv_namespaces]]` ブロック内の `REPLACE_WITH_KV_ID` に書き換えてください。
 
-#### 2. 管理者コードを決める
+#### 2. 管理者のメールアドレスを登録する
 
-自分だけが知っている、推測されにくい文字列を決めてください(例: `admin-2026-xyz789` のようなもの)。
+課金なしで全機能を使わせたい、自分(たち)のGoogleアカウントのメールアドレスを決めてください。複数人いる場合はカンマ区切りで入力できます。
 
 ```bash
-npx wrangler secret put ADMIN_CODE
+npx wrangler secret put ADMIN_EMAILS
+# 例: admin@gmail.com,cofounder@gmail.com
 ```
 
-このコードをアプリの設定画面の「あなたのコード」欄に入力し「状態を確認」を押せば、以降そのアプリでは課金なしで全機能が使えるようになります(このコードはビルドには一切埋め込まれず、サーバー側だけが知っているため、`X-App-Secret` よりも安全です)。
+登録したメールアドレスでGoogleアカウント連携すれば、以降そのアプリでは課金なしで全機能が使えるようになります。
 
-#### 3. Stripeで商品(サブスクリプション)と決済リンクを作る
+#### 3. Google OAuthクライアントIDをWorkerにも設定する
+
+メインREADME「7.」の手順4で作成した、**種類「ウェブ アプリケーション」**のクライアントID(`lib/config.ts` の `GOOGLE_WEB_CLIENT_ID` と同じ値)を、このWorkerにも設定します(IDトークンの検証で「このアプリ宛てに発行されたトークンか」を確認するために使います)。
+
+```bash
+npx wrangler secret put GOOGLE_WEB_CLIENT_ID
+```
+
+#### 4. Stripeで商品(サブスクリプション)と決済リンクを作る
 
 1. [Stripeの無料アカウント](https://dashboard.stripe.com/register)を作成する(月額固定費なし。決済が発生した分だけ手数料がかかる従量課金)。
 2. ダッシュボードの「商品カタログ」で新しい商品を作成し、価格を「継続課金(月額など)」に設定する。
 3. その商品から「決済リンク(Payment Link)」を作成する。作成後に表示されるURL(`https://buy.stripe.com/xxxxx`)をメモする。
-4. このリポジトリの `lib/config.ts` を開き、`BILLING_SUBSCRIBE_URL` にそのURLを設定する(アプリ側が自動で `?client_reference_id=...` を付け加えて開くので、URLはそのままでよい)。
+4. このリポジトリの `lib/config.ts` を開き、`BILLING_SUBSCRIBE_URL` にそのURLを設定する(アプリ側が自動で `?prefilled_email=...` を付け加えて開き、連携済みGoogleアカウントのメールアドレスがあらかじめ入力された状態になるので、URL自体はそのままでよい)。
 
-#### 4. Stripe Webhookを設定する
+#### 5. Stripe Webhookを設定する
 
 1. Stripeダッシュボードの「開発者」→「Webhook」→「エンドポイントを追加」を開く。
 2. エンドポイントURLに `https://kokorotalk-proxy.<あなたのサブドメイン>.workers.dev/v1/billing/webhook` を入力する。
@@ -123,7 +134,7 @@ npx wrangler secret put ADMIN_CODE
    npx wrangler secret put STRIPE_WEBHOOK_SECRET
    ```
 
-#### 5. 再デプロイする
+#### 6. 再デプロイする
 
 ```bash
 npx wrangler deploy
