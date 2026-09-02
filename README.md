@@ -283,12 +283,14 @@ GitHub Pagesの `username.github.io/リポジトリ名` という形式が気に
 
 1. [Cloudflareダッシュボード](https://dash.cloudflare.com/)の「Workers & Pages」→「アプリケーションを作成」→「Pages」→「Gitに接続」から、このリポジトリを連携する。
 2. ビルド設定を次のように入力する:
-   - ビルドコマンド: `npx expo export --platform web`
+   - ビルドコマンド: `npx expo export --platform web && node scripts/fix-cloudflare-pages-assets.js`
    - ビルド出力ディレクトリ: `dist`
 3. 作成すると、リポジトリ名とは無関係な `https://<プロジェクト名>.pages.dev` のようなURLが自動的に割り当てられる(プロジェクト名はCloudflare側で自由に決められる)。さらに独自ドメインを持っている場合は、「カスタムドメイン」からそのドメインに割り当てることもできる。
 4. GitHub Pages側(`.github/workflows/deploy-web.yml`、リポジトリの `Settings > Pages`)は使わなくなるため、混乱を避けるために無効化しておく(ワークフローファイルを削除するか、GitHubの「Actions」タブから無効化する)。
 
 Cloudflare Pagesはリポジトリのルートで直接 `npx expo export --platform web` を実行するため、GitHub Pages版のような「サブパスに合わせてbaseUrlを書き換える」処理(`deploy-web.yml` の該当ステップ)は不要です(ドメインのルートに公開されるため)。
+
+**注意:** ビルドコマンドに `&& node scripts/fix-cloudflare-pages-assets.js` を必ず付けてください。Cloudflare Pagesは仕様上、パスの途中に `node_modules` というフォルダ名を含む静的ファイルを自動的に配信対象から除外してしまうため、これを付けずにデプロイすると、マイクボタンなどのアイコン用フォント(`dist/assets/node_modules/@expo/vector-icons/...` に出力される)が配信されず、アイコンが表示されなくなります。このスクリプトは該当ファイルを `dist/assets/vendor/` に退避させ、ビルド済みJSからの参照も自動で書き換えます(GitHub Pages側はこの制約が無いため、Actionsのワークフローでは付ける必要はありません)。
 
 ## プロジェクト構成
 
@@ -321,6 +323,8 @@ lib/                  ロジック(UIに依存しない部分)
   voicevoxVvmCatalog.ts   VVMファイルと話者/スタイルIDの対応表
 modules/voicevox-local/  VOICEVOXをアプリに内蔵するExpoネイティブモジュール(Android限定・実験的)
 android-debug-keystore/  Android版の署名を固定するためのdebugキーストア(Google連携のSHA-1安定化用。秘密情報ではない)
+scripts/
+  fix-cloudflare-pages-assets.js  Cloudflare Pagesデプロイ用の後処理(node_modulesを含むパスの除外対策)
 .github/workflows/    GitHub ActionsによるAPKビルド・Web公開
 proxy-worker/         対話AIの共有プロキシ(Cloudflare Workers)。開発者のAPIキーをここに集約
   src/index.js            リクエストの中継・課金/管理者判定・Stripe Webhook受信
