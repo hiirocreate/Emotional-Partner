@@ -90,6 +90,18 @@ jobs:
       - name: Generate native Android project (expo prebuild)
         run: npx expo prebuild --platform android --no-install
 
+      - name: Install fixed debug keystore (stable SHA-1 for Google連携)
+        # `expo prebuild` はandroid/を毎回まっさらに作り直すため、何もしないと
+        # `android/app/debug.keystore` はビルドのたびに新しいランダムな鍵で
+        # 自動生成されてしまう(=署名のSHA-1がビルドごとに変わってしまう)。
+        # Google連携(lib/googleAuth.ts, README「7.」参照)のAndroid側OAuthクライアントは
+        # 特定のSHA-1を事前登録する方式のため、SHA-1を毎回固定する必要がある。
+        # そのためリポジトリに固定のdebug.keystoreを同梱し(android-debug-keystore/)、
+        # prebuildが生成したものの上から上書きする。
+        # (debug用の鍵であり秘密情報ではないためリポジトリに含めて問題ない。
+        #  本番配布用の署名鍵とは別物。)
+        run: cp android-debug-keystore/debug.keystore android/app/debug.keystore
+
       - name: Make gradlew executable
         run: chmod +x android/gradlew
 
