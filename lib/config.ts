@@ -95,8 +95,7 @@ export const GOOGLE_WEB_CLIENT_ID = "76724605537-3rcnirg8hvksdcut1u8iopcb77o6h6v
  * 「このアプリのふりをしてOAuth認可画面を表示させる」程度で、他人のGoogle
  * アカウントのデータには(利用者本人の同意なしには)アクセスできません。
  */
-export const GOOGLE_WEB_CLIENT_SECRET = "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
-";
+export const GOOGLE_WEB_CLIENT_SECRET = "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";
 
 /** Googleアカウント連携が設定済みかどうか */
 export function isGoogleSyncConfigured(): boolean {
