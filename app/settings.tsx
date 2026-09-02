@@ -18,6 +18,14 @@ import * as Clipboard from "expo-clipboard";
 import { ColorSwatchPicker } from "../components/ColorSwatchPicker";
 import { PERSONA_PRESETS } from "../lib/personas";
 import {
+  deleteVvm,
+  downloadVvm,
+  isLocalVoicevoxSupported,
+  isVvmDownloaded,
+  listDownloadedVvmFiles,
+} from "../lib/localVoicevox";
+import { LOCAL_VOICEVOX_CATALOG } from "../lib/voicevoxVvmCatalog";
+import {
   isBillingConfigured,
   isSharedProxyConfigured,
   isSharedVoicevoxConfigured,
@@ -149,6 +157,10 @@ export default function SettingsScreen() {
   const [googleApiKeyDraft, setGoogleApiKeyDraft] = useState("");
   const [googleLoading, setGoogleLoading] = useState(false);
   const [googleError, setGoogleError] = useState<string | null>(null);
+  const [downloadedVvmFiles, setDownloadedVvmFiles] = useState<string[]>([]);
+  const [downloadingVvmFile, setDownloadingVvmFile] = useState<string | null>(null);
+  const [downloadProgress, setDownloadProgress] = useState<number | null>(null);
+  const [localVoicevoxError, setLocalVoicevoxError] = useState<string | null>(null);
   const [customPersonaText, setCustomPersonaText] = useState("");
   const [openRouterConnecting, setOpenRouterConnecting] = useState(false);
   const [licenseCodeDraft, setLicenseCodeDraft] = useState("");
@@ -201,6 +213,9 @@ export default function SettingsScreen() {
           fetchGoogleVoices(s.voice.google.apiKey, false);
         }
       }
+      if (isLocalVoicevoxSupported()) {
+        setDownloadedVvmFiles(listDownloadedVvmFiles());
+      }
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -228,7 +243,7 @@ export default function SettingsScreen() {
   };
 
   const onSelectTtsProvider = (provider: TtsProviderId) => {
-    if (provider === "voicevox" && !hasPaidAccess(settings.billing)) {
+    if ((provider === "voicevox" || provider === "voicevox_local") && !hasPaidAccess(settings.billing)) {
       showAlert(
         "有料プランが必要です",
         "VOICEVOX(端末にない読み上げボイス)のご利用には、有料プランへの加入または管理者コードの入力が必要です。下の「利用プラン」欄からご確認ください。"
@@ -236,6 +251,54 @@ export default function SettingsScreen() {
       return;
     }
     persist({ ...settings, voice: { ...settings.voice, provider } });
+  };
+
+  const handleSelectLocalVoicevoxStyle = async (vvmFileName: string, styleId: number) => {
+    setLocalVoicevoxError(null);
+    if (!isVvmDownloaded(vvmFileName)) {
+      setDownloadingVvmFile(vvmFileName);
+      setDownloadProgress(0);
+      try {
+        await downloadVvm(vvmFileName, (ratio) => setDownloadProgress(ratio));
+        setDownloadedVvmFiles(listDownloadedVvmFiles());
+      } catch (e) {
+        setLocalVoicevoxError(
+          e instanceof Error ? e.message : "ダウンロードに失敗しました。電波状況を確認してください。"
+        );
+        return;
+      } finally {
+        setDownloadingVvmFile(null);
+        setDownloadProgress(null);
+      }
+    }
+    persist({
+      ...settings,
+      voice: { ...settings.voice, localVoicevox: { selectedStyleId: styleId } },
+    });
+  };
+
+  const handleDeleteLocalVvm = (vvmFileName: string) => {
+    const doDelete = () => {
+      deleteVvm(vvmFileName);
+      setDownloadedVvmFiles(listDownloadedVvmFiles());
+      const entry = LOCAL_VOICEVOX_CATALOG.find((e) => e.vvmFile === vvmFileName);
+      const selectedInThisFile = entry?.styles.some(
+        (s) => s.styleId === settings.voice.localVoicevox.selectedStyleId
+      );
+      if (selectedInThisFile) {
+        persist({
+          ...settings,
+          voice: { ...settings.voice, localVoicevox: { selectedStyleId: null } },
+        });
+      }
+    };
+    showConfirm(
+      "ダウンロード済みデータを削除しますか？",
+      "この声を再度使うには、もう一度ダウンロードが必要になります。",
+      "削除する",
+      doDelete,
+      true
+    );
   };
 
   const onSelectSystemVoice = (id: string) => {
@@ -538,8 +601,10 @@ export default function SettingsScreen() {
   const onBlurCallUserAs = () => persist(settings);
 
   const testVoice = () => {
+    const isPaidProvider =
+      settings.voice.provider === "voicevox" || settings.voice.provider === "voicevox_local";
     const voiceToUse =
-      settings.voice.provider === "voicevox" && !hasPaidAccess(settings.billing)
+      isPaidProvider && !hasPaidAccess(settings.billing)
         ? { ...settings.voice, provider: "system" as const }
         : settings.voice;
     speakText("こんにちは。この声でお話しします。", voiceToUse, {
@@ -550,6 +615,8 @@ export default function SettingsScreen() {
             ? "VOICEVOXエンジンへの接続、または話者選択を確認してください。"
             : settings.voice.provider === "google"
             ? "Google Cloud TTSのAPIキー、または音声選択を確認してください。"
+            : settings.voice.provider === "voicevox_local"
+            ? "内蔵VOICEVOXの声の選択、またはダウンロード状況を確認してください。"
             : "この端末で利用できる音声が見つかりませんでした。"
         ),
     });
@@ -568,6 +635,8 @@ export default function SettingsScreen() {
       ? voicevoxSpeakers
       : settings.voice.provider === "google"
       ? googleVoices
+      : settings.voice.provider === "voicevox_local"
+      ? []
       : systemVoices;
   const activeSelectedId =
     settings.voice.provider === "voicevox"
@@ -576,6 +645,8 @@ export default function SettingsScreen() {
         : null
       : settings.voice.provider === "google"
       ? settings.voice.google.voiceName
+      : settings.voice.provider === "voicevox_local"
+      ? null
       : settings.voice.selectedVoiceId;
 
   const isAdmin = settings.billing.status === "admin";
@@ -716,6 +787,24 @@ export default function SettingsScreen() {
               Google Cloud TTS（自分のAPIキー）
             </Text>
           </Pressable>
+          {isLocalVoicevoxSupported() ? (
+            <Pressable
+              onPress={() => onSelectTtsProvider("voicevox_local")}
+              style={[
+                styles.chip,
+                settings.voice.provider === "voicevox_local" && styles.chipActive,
+              ]}
+            >
+              <Text
+                style={[
+                  styles.chipText,
+                  settings.voice.provider === "voicevox_local" && styles.chipTextActive,
+                ]}
+              >
+                VOICEVOX（内蔵・Android限定）
+              </Text>
+            </Pressable>
+          ) : null}
         </View>
 
         {settings.voice.provider === "voicevox" ? (
@@ -794,43 +883,109 @@ export default function SettingsScreen() {
           </>
         ) : null}
 
-        <Text style={styles.label}>
-          {settings.voice.provider === "voicevox"
-            ? `話者（${activeVoiceList.length}種類）`
-            : settings.voice.provider === "google"
-            ? `音声（${activeVoiceList.length}種類から選択）`
-            : `読み上げボイス（${activeVoiceList.length}種類から選択）`}
-        </Text>
-        {activeVoiceList.length === 0 ? (
-          <Text style={styles.smallHelper}>
-            {settings.voice.provider === "voicevox"
-              ? "まだ話者を取得していません。上のURLを入力して「接続して話者一覧を取得」を押してください。"
-              : settings.voice.provider === "google"
-              ? "まだ音声を取得していません。上にAPIキーを入力して「接続して音声一覧を取得」を押してください。"
-              : "利用可能な音声を検出できませんでした。端末/ブラウザの音声合成設定をご確認ください。"}
-          </Text>
-        ) : (
-          <View style={styles.chipWrap}>
-            {activeVoiceList.map((v) => (
-              <Pressable
-                key={v.id}
-                onPress={() =>
-                  settings.voice.provider === "voicevox"
-                    ? onSelectVoicevoxSpeaker(v.id)
-                    : settings.voice.provider === "google"
-                    ? onSelectGoogleVoice(v.id)
-                    : onSelectSystemVoice(v.id)
-                }
-                style={[styles.chip, activeSelectedId === v.id && styles.chipActive]}
-              >
-                <Text
-                  style={[styles.chipText, activeSelectedId === v.id && styles.chipTextActive]}
-                >
-                  {v.label}
+        {settings.voice.provider === "voicevox_local" ? (
+          <>
+            {!hasPaidAccess(settings.billing) ? (
+              <Text style={styles.errorHelper}>
+                内蔵VOICEVOXは有料プランの方のみご利用いただけます。下の「利用プラン」から加入するか、管理者コードを入力してください(有効になるまでは端末内蔵ボイスで読み上げられます)。
+              </Text>
+            ) : null}
+            <Text style={styles.smallHelper}>
+              サーバーに接続せず、この端末に声のデータをダウンロードして直接読み上げます(実験的機能)。タップした声のデータが未ダウンロードの場合、自動的にダウンロードしてから選択されます。ダウンロードにはVOICEVOXの利用規約への同意が前提となり、各声のクレジット表記が必要です(README参照)。
+            </Text>
+            {localVoicevoxError ? <Text style={styles.errorHelper}>{localVoicevoxError}</Text> : null}
+            {downloadingVvmFile ? (
+              <View style={styles.row}>
+                <ActivityIndicator size="small" color="#2F5BD9" />
+                <Text style={styles.smallHelper}>
+                  {`ダウンロード中… ${downloadProgress != null ? Math.round(downloadProgress * 100) + "%" : ""}`}
                 </Text>
-              </Pressable>
-            ))}
-          </View>
+              </View>
+            ) : null}
+
+            <Text style={styles.label}>声を選ぶ（タップで選択、未ダウンロードなら自動取得）</Text>
+            <View style={styles.chipWrap}>
+              {LOCAL_VOICEVOX_CATALOG.flatMap((entry) =>
+                entry.styles.map((style) => {
+                  const selected = settings.voice.localVoicevox.selectedStyleId === style.styleId;
+                  const downloaded = downloadedVvmFiles.includes(entry.vvmFile);
+                  return (
+                    <Pressable
+                      key={style.styleId}
+                      onPress={() => handleSelectLocalVoicevoxStyle(entry.vvmFile, style.styleId)}
+                      disabled={downloadingVvmFile != null}
+                      style={[styles.chip, selected && styles.chipActive]}
+                    >
+                      <Text style={[styles.chipText, selected && styles.chipTextActive]}>
+                        {downloaded ? "✓ " : "⬇ "}
+                        {style.speakerName}（{style.styleName}）
+                      </Text>
+                    </Pressable>
+                  );
+                })
+              )}
+            </View>
+
+            {downloadedVvmFiles.length > 0 ? (
+              <>
+                <Text style={styles.label}>ダウンロード済みデータの管理</Text>
+                <View style={styles.chipWrap}>
+                  {downloadedVvmFiles.map((vvmFileName) => (
+                    <Pressable
+                      key={vvmFileName}
+                      onPress={() => handleDeleteLocalVvm(vvmFileName)}
+                      style={styles.chip}
+                    >
+                      <Text style={styles.chipText}>🗑 {vvmFileName} を削除</Text>
+                    </Pressable>
+                  ))}
+                </View>
+              </>
+            ) : null}
+          </>
+        ) : null}
+
+        {settings.voice.provider === "voicevox_local" ? null : (
+          <>
+            <Text style={styles.label}>
+              {settings.voice.provider === "voicevox"
+                ? `話者（${activeVoiceList.length}種類）`
+                : settings.voice.provider === "google"
+                ? `音声（${activeVoiceList.length}種類から選択）`
+                : `読み上げボイス（${activeVoiceList.length}種類から選択）`}
+            </Text>
+            {activeVoiceList.length === 0 ? (
+              <Text style={styles.smallHelper}>
+                {settings.voice.provider === "voicevox"
+                  ? "まだ話者を取得していません。上のURLを入力して「接続して話者一覧を取得」を押してください。"
+                  : settings.voice.provider === "google"
+                  ? "まだ音声を取得していません。上にAPIキーを入力して「接続して音声一覧を取得」を押してください。"
+                  : "利用可能な音声を検出できませんでした。端末/ブラウザの音声合成設定をご確認ください。"}
+              </Text>
+            ) : (
+              <View style={styles.chipWrap}>
+                {activeVoiceList.map((v) => (
+                  <Pressable
+                    key={v.id}
+                    onPress={() =>
+                      settings.voice.provider === "voicevox"
+                        ? onSelectVoicevoxSpeaker(v.id)
+                        : settings.voice.provider === "google"
+                        ? onSelectGoogleVoice(v.id)
+                        : onSelectSystemVoice(v.id)
+                    }
+                    style={[styles.chip, activeSelectedId === v.id && styles.chipActive]}
+                  >
+                    <Text
+                      style={[styles.chipText, activeSelectedId === v.id && styles.chipTextActive]}
+                    >
+                      {v.label}
+                    </Text>
+                  </Pressable>
+                ))}
+              </View>
+            )}
+          </>
         )}
 
         <Pressable style={styles.testButton} onPress={testVoice}>
@@ -855,7 +1010,7 @@ export default function SettingsScreen() {
 
       <Section title="利用プラン">
         <Text style={styles.helper}>
-          「備え付けのAI」(共有プロキシ経由の対話AI)とVOICEVOX(端末にない読み上げボイス)は、有料プランへの加入、または管理者コードの入力が必要な機能です。「自分のAPIキーを使う」モードと端末/ブラウザ内蔵ボイスは、プラン状態に関わらず無料でお使いいただけます。
+          「備え付けのAI」(共有プロキシ経由の対話AI)とVOICEVOX(サーバー方式・内蔵方式どちらも)は、有料プランへの加入、または管理者コードの入力が必要な機能です。「自分のAPIキーを使う」モードと端末/ブラウザ内蔵ボイスは、プラン状態に関わらず無料でお使いいただけます。
         </Text>
 
         <View style={styles.planBadge}>
