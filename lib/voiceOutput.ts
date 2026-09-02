@@ -3,6 +3,7 @@ import * as Speech from "expo-speech";
 import { createAudioPlayer, type AudioPlayer } from "expo-audio";
 import { File, Paths } from "expo-file-system";
 import { base64ToBytes } from "./base64";
+import { synthesizeLocal } from "./localVoicevox";
 import { VoiceOption, VoiceSettings } from "./types";
 
 /**
@@ -159,8 +160,9 @@ export interface SpeakCallbacks {
   onError?: () => void;
 }
 
-function needsCloudSynthesis(voice: VoiceSettings): boolean {
-  return voice.provider === "voicevox" || voice.provider === "google";
+/** ネットワーク通信(VOICEVOXサーバー/Google Cloud TTS)、またはAndroid内蔵VOICEVOXでの非同期合成が必要か */
+function needsAsyncSynthesis(voice: VoiceSettings): boolean {
+  return voice.provider === "voicevox" || voice.provider === "google" || voice.provider === "voicevox_local";
 }
 
 /**
@@ -179,8 +181,8 @@ export function speakText(
 }
 
 function dispatchSpeak(text: string, voice: VoiceSettings, callbacks: SpeakCallbacks) {
-  if (needsCloudSynthesis(voice)) {
-    synthesizeCloudAudio(text, voice)
+  if (needsAsyncSynthesis(voice)) {
+    synthesizeAsyncAudio(text, voice)
       .then((audio) => playAudioArrayBuffer(audio.arrayBuffer, audio.mimeType, audio.fileExt, callbacks))
       .catch((e) => {
         console.warn("読み上げに失敗しました", e);
@@ -234,8 +236,8 @@ export function enqueueSpeech(
   callbacks: SpeakCallbacks = {}
 ): void {
   if (!text.trim()) return;
-  const synthesis = needsCloudSynthesis(voice)
-    ? synthesizeCloudAudio(text, voice).catch((e) => {
+  const synthesis = needsAsyncSynthesis(voice)
+    ? synthesizeAsyncAudio(text, voice).catch((e) => {
         console.warn("音声合成の先読みに失敗しました", e);
         return null;
       })
@@ -347,14 +349,22 @@ function speakWithSystemVoice(
   });
 }
 
-/** voice.provider に応じてVOICEVOX/Google Cloud TTSの音声データを取得する(再生はしない)。 */
-async function synthesizeCloudAudio(text: string, voice: VoiceSettings): Promise<SynthesizedAudio> {
+/** voice.provider に応じてVOICEVOX(サーバー/内蔵)/Google Cloud TTSの音声データを取得する(再生はしない)。 */
+async function synthesizeAsyncAudio(text: string, voice: VoiceSettings): Promise<SynthesizedAudio> {
   if (voice.provider === "voicevox") {
     const { baseUrl, speakerId } = voice.voicevox;
     if (!baseUrl || speakerId == null) {
       throw new Error("VOICEVOXの接続先または話者が未設定です");
     }
     return synthesizeVoicevox(text, baseUrl, speakerId, voice.rate, voice.pitch);
+  }
+
+  if (voice.provider === "voicevox_local") {
+    const { selectedStyleId } = voice.localVoicevox;
+    if (selectedStyleId == null) {
+      throw new Error("内蔵VOICEVOXの声が選択されていません");
+    }
+    return synthesizeLocal(text, selectedStyleId);
   }
 
   const { apiKey, voiceName } = voice.google;
