@@ -11,7 +11,7 @@
  */
 
 /** Cloudflare Workersのデプロイ先URL。例: https://kokorotalk-proxy.your-name.workers.dev/v1 */
-export const SHARED_PROXY_BASE_URL = "https://kokorotalk-proxy.h-onoue-test.workers.dev/";
+export const SHARED_PROXY_BASE_URL = "https://kokorotalk-proxy.h-onoue-test.workers.dev/v1";
 
 /**
  * プロキシへのアクセスを軽くゲートするための共有シークレット。
