@@ -30,6 +30,10 @@ export async function loadSettings(): Promise<AppSettings> {
           ...DEFAULT_SETTINGS.voice.google,
           ...parsed.voice?.google,
         },
+        localVoicevox: {
+          ...DEFAULT_SETTINGS.voice.localVoicevox,
+          ...parsed.voice?.localVoicevox,
+        },
       },
       ai: { ...DEFAULT_SETTINGS.ai, ...parsed.ai },
       billing: { ...DEFAULT_SETTINGS.billing, ...parsed.billing },
