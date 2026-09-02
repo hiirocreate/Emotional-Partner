@@ -11,7 +11,7 @@
  */
 
 /** Cloudflare Workersのデプロイ先URL。例: https://kokorotalk-proxy.your-name.workers.dev/v1 */
-export const SHARED_PROXY_BASE_URL = "";
+export const SHARED_PROXY_BASE_URL = "https://kokorotalk-proxy.h-onoue-test.workers.dev/";
 
 /**
  * プロキシへのアクセスを軽くゲートするための共有シークレット。
@@ -24,7 +24,7 @@ export const SHARED_PROXY_BASE_URL = "";
  * 悪用が心配な場合は、後述のレート制限(Cloudflare Workers Rate Limiting)を
  * あわせて設定してください。
  */
-export const SHARED_PROXY_APP_SECRET = "";
+export const SHARED_PROXY_APP_SECRET = "kokorononakahanozokenai";
 
 /** 共有プロキシが利用可能かどうか(値が設定されているか)を返す */
 export function isSharedProxyConfigured(): boolean {
@@ -40,7 +40,7 @@ export function isSharedProxyConfigured(): boolean {
  * 自動的に付け加えて開くため、ここには素のPayment LinkのURLだけを設定すればよい。
  * 加入・状態確認はGoogleアカウント連携(google.connected)が前提になる。
  */
-export const BILLING_SUBSCRIBE_URL = "";
+export const BILLING_SUBSCRIBE_URL = "https://buy.stripe.com/test_fZufZhaZu0dHbCXdM8dUY00";
 
 /** 有料プランの決済リンクが設定済みかどうか */
 export function isBillingConfigured(): boolean {
@@ -80,7 +80,7 @@ export function isSharedVoicevoxConfigured(): boolean {
  *   登録しておく必要があります(コード上に直接設定する値はありません。
  *   Google Play servicesがビルドの署名から自動判定します)。
  */
-export const GOOGLE_WEB_CLIENT_ID = "";
+export const GOOGLE_WEB_CLIENT_ID = "76724605537-3rcnirg8hvksdcut1u8iopcb77o6h6v7.apps.googleusercontent.com";
 
 /**
  * 上記「ウェブ アプリケーション」クライアントに発行されるクライアントシークレット。
@@ -95,7 +95,8 @@ export const GOOGLE_WEB_CLIENT_ID = "";
  * 「このアプリのふりをしてOAuth認可画面を表示させる」程度で、他人のGoogle
  * アカウントのデータには(利用者本人の同意なしには)アクセスできません。
  */
-export const GOOGLE_WEB_CLIENT_SECRET = "";
+export const GOOGLE_WEB_CLIENT_SECRET = "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
+";
 
 /** Googleアカウント連携が設定済みかどうか */
 export function isGoogleSyncConfigured(): boolean {
