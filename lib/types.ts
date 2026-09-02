@@ -31,7 +31,7 @@ export interface PersonaSettings {
 }
 
 /** 音声合成(TTS)の音源プロバイダ */
-export type TtsProviderId = "system" | "voicevox" | "google";
+export type TtsProviderId = "system" | "voicevox" | "google" | "voicevox_local";
 
 export interface VoiceOption {
   id: string; // OS/ブラウザ、またはVOICEVOX/Google Cloud TTSが返すvoice/speaker identifier
@@ -57,12 +57,25 @@ export interface GoogleTtsSettings {
   voiceName: string | null;
 }
 
+/**
+ * 「VOICEVOXをアプリに内蔵する」機能(Android限定・実験的)の設定。
+ * サーバー(voicevoxSettings)とは別に、端末にダウンロードした音声モデル(VVM)を
+ * 使って直接合成する。ダウンロード済みファイルの一覧はディスク上の実体から
+ * 判定するため、ここでは「今どのスタイルを使うか」だけを保持する。
+ * 詳細は lib/localVoicevox.ts, modules/voicevox-local/ 参照。
+ */
+export interface LocalVoicevoxSettings {
+  /** 選択中のスタイルID。未選択ならnull */
+  selectedStyleId: number | null;
+}
+
 export interface VoiceSettings {
   provider: TtsProviderId;
   /** provider="system" のときに使う、端末/ブラウザ内蔵ボイスのID */
   selectedVoiceId: string | null;
   voicevox: VoicevoxSettings;
   google: GoogleTtsSettings;
+  localVoicevox: LocalVoicevoxSettings;
   autoSpeak: boolean; // AIの返答を自動で読み上げるか
   rate: number;
   pitch: number;
@@ -153,6 +166,9 @@ export const DEFAULT_SETTINGS: AppSettings = {
     google: {
       apiKey: "",
       voiceName: null,
+    },
+    localVoicevox: {
+      selectedStyleId: null,
     },
     autoSpeak: false,
     rate: 1.0,
