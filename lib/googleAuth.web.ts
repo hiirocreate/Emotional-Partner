@@ -33,6 +33,19 @@ export class GoogleAuthError extends Error {}
 export interface GoogleAuthResult {
   email: string | null;
   accessToken: string;
+  idToken: string | null;
+}
+
+/**
+ * 直近のサインインで得たトークンを、このページセッションの間だけメモリ上に
+ * 保持する(AsyncStorage等の永続ストレージには一切書かない)。ページを
+ * リロードすれば消える。これにより、ログイン直後だけでなく、その後
+ * 有効期限(約1時間)内であればドライブ同期・課金状態の確認が繰り返し使える。
+ */
+let cachedTokens: { accessToken: string; idToken: string | null; expiresAt: number } | null = null;
+
+function cacheIsValid(): boolean {
+  return cachedTokens != null && cachedTokens.expiresAt > Date.now();
 }
 
 function toBase64Url(base64: string): string {
@@ -136,10 +149,19 @@ export async function connectGoogleAccount(): Promise<GoogleAuthResult | null> {
       `Google側でエラーが発生しました(status ${tokenRes.status})。時間をおいて再度お試しください。`
     );
   }
-  const tokenData: { access_token?: string } = await tokenRes.json();
+  const tokenData: { access_token?: string; id_token?: string; expires_in?: number } =
+    await tokenRes.json();
   if (!tokenData.access_token) {
     throw new GoogleAuthError("Googleからアクセストークンを受け取れませんでした。");
   }
+
+  const expiresInMs = (tokenData.expires_in ?? 3600) * 1000;
+  cachedTokens = {
+    accessToken: tokenData.access_token,
+    idToken: tokenData.id_token ?? null,
+    // 実際の有効期限より少し手前で切れたことにし、境界での失敗を避ける
+    expiresAt: Date.now() + expiresInMs - 30_000,
+  };
 
   let email: string | null = null;
   try {
@@ -154,18 +176,28 @@ export async function connectGoogleAccount(): Promise<GoogleAuthResult | null> {
     // メールアドレスは表示用にすぎないので、取得失敗は無視する
   }
 
-  return { email, accessToken: tokenData.access_token };
+  return { email, accessToken: tokenData.access_token, idToken: cachedTokens.idToken };
 }
 
 /**
  * Web版はリフレッシュトークンを保持しないため、サイレント再認証はできない。
- * 呼び出し側は「アクセストークンが無ければ再ログインを促す」形で対応する。
+ * ログイン直後から有効期限(約1時間)が切れるまでは、メモリ上に保持した
+ * トークンをそのまま返す。期限切れ後(またはページのリロード後)は null を返し、
+ * 呼び出し側は「再度ログインを促す」形で対応する。
  */
 export async function getGoogleAccessToken(): Promise<string | null> {
-  return null;
+  return cacheIsValid() ? cachedTokens!.accessToken : null;
 }
 
-/** Web版は保存している認証情報が無いため、特にやることはない */
+/**
+ * 課金状態の確認(このGoogleアカウントのメールアドレス本人であることの証明)に使う
+ * IDトークンを返す。仕組みはgetGoogleAccessTokenと同じ(メモリ上のみ・期限内のみ)。
+ */
+export async function getGoogleIdToken(): Promise<string | null> {
+  return cacheIsValid() ? cachedTokens!.idToken : null;
+}
+
+/** Web版は永続化した認証情報が無いため、メモリ上のキャッシュを消すだけでよい */
 export async function disconnectGoogleAccount(): Promise<void> {
-  // no-op
+  cachedTokens = null;
 }

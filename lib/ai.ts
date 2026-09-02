@@ -30,7 +30,8 @@ export async function requestSimpleCompletion(
   systemPrompt: string,
   userPrompt: string,
   aiSettings: AiProviderSettings,
-  billing: BillingSettings
+  billing: BillingSettings,
+  googleIdToken: string | null
 ): Promise<string> {
   const useProxy = aiSettings.mode === "proxy";
 
@@ -39,6 +40,11 @@ export async function requestSimpleCompletion(
   }
   if (useProxy && !hasPaidAccess(billing)) {
     throw new AiConfigError("備え付けのAI(共有プロキシ)は有料プランの方のみご利用いただけます。");
+  }
+  if (useProxy && !googleIdToken) {
+    throw new AiConfigError(
+      "Google連携の認証が切れています。設定画面の「Googleアカウント連携」から再度サインインしてください。"
+    );
   }
   if (!useProxy && !aiSettings.apiKey) {
     throw new AiConfigError("AIのAPIキーが設定されていません。");
@@ -53,7 +59,7 @@ export async function requestSimpleCompletion(
   const headers: Record<string, string> = { "Content-Type": "application/json" };
   if (useProxy) {
     headers["X-App-Secret"] = SHARED_PROXY_APP_SECRET;
-    headers["X-License-Code"] = billing.licenseCode || "";
+    headers["X-Google-Id-Token"] = googleIdToken || "";
   } else {
     headers["Authorization"] = `Bearer ${aiSettings.apiKey}`;
   }
@@ -94,7 +100,8 @@ export function streamAiReply(
   aiSettings: AiProviderSettings,
   billing: BillingSettings,
   onDelta: (fullTextSoFar: string) => void,
-  memorySummary?: string
+  memorySummary?: string,
+  googleIdToken?: string | null
 ): { promise: Promise<string>; abort: () => void } {
   let xhr: XMLHttpRequest | undefined;
 
@@ -112,7 +119,15 @@ export function streamAiReply(
     if (useProxy && !hasPaidAccess(billing)) {
       reject(
         new AiConfigError(
-          "備え付けのAI(共有プロキシ)は有料プランの方のみご利用いただけます。設定画面の「利用プラン」から加入するか、管理者コードを入力してください。"
+          "備え付けのAI(共有プロキシ)は有料プランの方のみご利用いただけます。設定画面の「利用プラン」から加入してください。"
+        )
+      );
+      return;
+    }
+    if (useProxy && !googleIdToken) {
+      reject(
+        new AiConfigError(
+          "Google連携の認証が切れています。設定画面の「Googleアカウント連携」から再度サインインしてください。"
         )
       );
       return;
@@ -153,7 +168,7 @@ export function streamAiReply(
     xhr.setRequestHeader("Content-Type", "application/json");
     if (useProxy) {
       xhr.setRequestHeader("X-App-Secret", SHARED_PROXY_APP_SECRET);
-      xhr.setRequestHeader("X-License-Code", billing.licenseCode || "");
+      xhr.setRequestHeader("X-Google-Id-Token", googleIdToken || "");
     } else {
       xhr.setRequestHeader("Authorization", `Bearer ${aiSettings.apiKey}`);
     }
@@ -207,7 +222,7 @@ export function streamAiReply(
         } else if (xhr.status === 402) {
           reject(
             new AiRequestError(
-              "備え付けのAI(共有プロキシ)は有料プランの方のみご利用いただけます。設定画面の「利用プラン」から加入するか、管理者コードを入力してください。"
+              "備え付けのAI(共有プロキシ)は有料プランの方のみご利用いただけます。設定画面の「利用プラン」から加入してください。"
             )
           );
         } else {

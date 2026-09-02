@@ -46,7 +46,8 @@ export async function updateUserMemory(
   previousMemory: UserMemorySettings,
   recentMessages: ChatMessage[],
   aiSettings: AiProviderSettings,
-  billing: BillingSettings
+  billing: BillingSettings,
+  googleIdToken: string | null
 ): Promise<MemoryUpdateResult> {
   if (recentMessages.length === 0) {
     return { memory: previousMemory };
@@ -65,7 +66,8 @@ export async function updateUserMemory(
       SUMMARY_SYSTEM_PROMPT,
       userPrompt,
       aiSettings,
-      billing
+      billing,
+      googleIdToken
     );
     return {
       memory: {

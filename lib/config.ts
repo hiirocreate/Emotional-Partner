@@ -36,8 +36,9 @@ export function isSharedProxyConfigured(): boolean {
  * Stripeの「決済リンク(Payment Link)」を発行し、そのURLをそのまま設定してください
  * (`https://buy.stripe.com/xxxxx` の形式)。詳しい手順は proxy-worker/README.md を参照。
  *
- * アプリ側はこのURLの末尾に `?client_reference_id=<この端末のコード>` を自動的に
- * 付け加えて開くため、ここには素のPayment LinkのURLだけを設定すればよい。
+ * アプリ側はこのURLの末尾に `?prefilled_email=<連携中のGoogleアカウントのメール>` を
+ * 自動的に付け加えて開くため、ここには素のPayment LinkのURLだけを設定すればよい。
+ * 加入・状態確認はGoogleアカウント連携(google.connected)が前提になる。
  */
 export const BILLING_SUBSCRIBE_URL = "";
 

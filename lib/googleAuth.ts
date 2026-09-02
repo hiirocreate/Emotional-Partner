@@ -28,6 +28,7 @@ export class GoogleAuthError extends Error {}
 export interface GoogleAuthResult {
   email: string | null;
   accessToken: string;
+  idToken: string | null;
 }
 
 let configured = false;
@@ -65,7 +66,11 @@ export async function connectGoogleAccount(): Promise<GoogleAuthResult | null> {
       return null;
     }
     const tokens = await GoogleSignin.getTokens();
-    return { email: result.data.user.email ?? null, accessToken: tokens.accessToken };
+    return {
+      email: result.data.user.email ?? null,
+      accessToken: tokens.accessToken,
+      idToken: tokens.idToken ?? null,
+    };
   } catch (e) {
     if (isErrorWithCode(e) && e.code === statusCodes.SIGN_IN_CANCELLED) {
       return null;
@@ -89,6 +94,24 @@ export async function getGoogleAccessToken(): Promise<string | null> {
     if (result.type !== "success") return null;
     const tokens = await GoogleSignin.getTokens();
     return tokens.accessToken;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * サインイン済みであれば、課金状態の確認(このGoogleアカウントのメールアドレス
+ * 本人であることの証明)に使うIDトークンを返す。仕組みはgetGoogleAccessTokenと同じ。
+ */
+export async function getGoogleIdToken(): Promise<string | null> {
+  if (!isGoogleSyncConfigured()) return null;
+  ensureConfigured();
+  try {
+    if (!GoogleSignin.hasPreviousSignIn()) return null;
+    const result = await GoogleSignin.signInSilently();
+    if (result.type !== "success") return null;
+    const tokens = await GoogleSignin.getTokens();
+    return tokens.idToken ?? null;
   } catch {
     return null;
   }

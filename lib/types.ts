@@ -106,13 +106,16 @@ export interface AiProviderSettings {
  * - "checking": サーバーに問い合わせ中
  * - "none": 未加入(有料機能は利用不可)
  * - "active": 有料プラン加入中
- * - "admin": 管理者コードによる無償の全機能開放
+ * - "admin": 管理者(のメールアドレス)による無償の全機能開放
+ *
+ * 課金・管理者判定は、この端末で連携しているGoogleアカウントの
+ * メールアドレス単位で行う(以前あった「端末ごとのランダムなコード」方式は廃止)。
+ * サブスクへの加入・状態確認には google.connected が true である必要がある。
+ * 詳細は lib/billing.ts, lib/googleAuth.ts, README「7.」参照。
  */
 export type LicenseStatus = "unknown" | "checking" | "none" | "active" | "admin";
 
 export interface BillingSettings {
-  /** この端末用に生成された識別コード。購入時の紐付けや管理者コード入力に使う */
-  licenseCode: string;
   status: LicenseStatus;
   /** サブスクの有効期限(UNIXミリ秒)。管理者/期限なしの場合はnull */
   expiresAt: number | null;
@@ -214,7 +217,6 @@ export const DEFAULT_SETTINGS: AppSettings = {
     model: "openai/gpt-oss-20b",
   },
   billing: {
-    licenseCode: "",
     status: "unknown",
     expiresAt: null,
     lastCheckedAt: null,
