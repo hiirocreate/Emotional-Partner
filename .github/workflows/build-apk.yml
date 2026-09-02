@@ -46,7 +46,12 @@ jobs:
             -o voicevox_dl/download
           chmod +x voicevox_dl/download
 
-          voicevox_dl/download \
+          # ダウンローダーは「VOICEVOX ONNX Runtime利用規約」への同意を対話的に求めてくる
+          # (CI上では表示用のページャーがエラーになるが、y/n/rの入力自体はstdin経由で読めるため
+          # 影響はない)。この利用規約の内容はREADME「6.」に記載した内容と同じもの
+          # (商用・非商用問わず利用可・アプリへの組み込み/再配布可・利用時はVOICEVOXの
+          # クレジット表記が必要)なので、ここで自動的に同意(y)して進める。
+          printf 'y\n' | voicevox_dl/download \
             --os android --cpu-arch arm64 \
             --exclude additional-libraries --exclude models \
             --output voicevox_dl/out
