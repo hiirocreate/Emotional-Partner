@@ -140,12 +140,44 @@ export interface ThemeSettings {
   customColors: CustomThemeColors | null;
 }
 
+/**
+ * Googleアカウント連携(履歴の引き継ぎ・AIの記憶の同期)の設定。
+ *
+ * サインイン自体のトークンはOSのアカウント管理(Android: Google Play services /
+ * Web: 短時間のアクセストークンのみ)に任せ、ここには「今どのアカウントに
+ * 繋がっているか」の表示用情報と同期状況だけを保持する。
+ * 実際の会話ログ・記憶データは端末内保存に加えて、そのGoogleアカウント自身の
+ * ドライブ(アプリ専用の非公開領域=appDataFolder)に保存する。
+ * 開発者のサーバーには一切送信・保存されない(既存の設計方針と同じ)。
+ * 詳細は lib/googleAuth.ts, lib/googleDriveSync.ts, README「7.」参照。
+ */
+export interface GoogleAccountSettings {
+  connected: boolean;
+  /** 表示用。実際の同一アカウント判定はOS側のサインイン状態そのものに任せる */
+  email: string | null;
+  /** 最後にGoogleドライブとの同期に成功した時刻(UNIXミリ秒) */
+  lastSyncedAt: number | null;
+}
+
+/**
+ * AIが会話から要約して覚えている、利用者についての短い記憶(ChatGPTの「メモリ」に近い)。
+ * Googleドライブ経由で同期されるため、別端末で同じGoogleアカウントに
+ * サインインすると引き継がれる。
+ */
+export interface UserMemorySettings {
+  /** 要約テキスト本文。空文字なら「まだ記憶なし」 */
+  summary: string;
+  updatedAt: number | null;
+}
+
 export interface AppSettings {
   persona: PersonaSettings;
   voice: VoiceSettings;
   ai: AiProviderSettings;
   billing: BillingSettings;
   theme: ThemeSettings;
+  google: GoogleAccountSettings;
+  userMemory: UserMemorySettings;
   onboardingDone: boolean;
 }
 
@@ -190,6 +222,15 @@ export const DEFAULT_SETTINGS: AppSettings = {
   theme: {
     presetId: "default",
     customColors: null,
+  },
+  google: {
+    connected: false,
+    email: null,
+    lastSyncedAt: null,
+  },
+  userMemory: {
+    summary: "",
+    updatedAt: null,
   },
   onboardingDone: false,
 };

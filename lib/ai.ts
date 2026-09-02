@@ -20,12 +20,81 @@ export class AiRequestError extends Error {}
  * Web/Native共通で動く XMLHttpRequest の progressive responseText を使って
  * SSEチャンクを手動パースする方式を採用している。
  */
+/**
+ * ストリーミング不要の、1回きりの単純な応答取得。
+ * 会話本体の応答生成(streamAiReply)とは別に、AIの記憶の要約更新(lib/memory.ts)など
+ * 「利用者向けの会話ではない、裏側の一回きりの依頼」に使う。
+ * ペルソナのシステムプロンプトは使わず、呼び出し側が渡した内容をそのまま送る。
+ */
+export async function requestSimpleCompletion(
+  systemPrompt: string,
+  userPrompt: string,
+  aiSettings: AiProviderSettings,
+  billing: BillingSettings
+): Promise<string> {
+  const useProxy = aiSettings.mode === "proxy";
+
+  if (useProxy && !isSharedProxyConfigured()) {
+    throw new AiConfigError("共有プロキシが未設定です。");
+  }
+  if (useProxy && !hasPaidAccess(billing)) {
+    throw new AiConfigError("備え付けのAI(共有プロキシ)は有料プランの方のみご利用いただけます。");
+  }
+  if (!useProxy && !aiSettings.apiKey) {
+    throw new AiConfigError("AIのAPIキーが設定されていません。");
+  }
+  if (!useProxy && (!aiSettings.baseUrl || !aiSettings.model)) {
+    throw new AiConfigError("AIプロバイダの接続先/モデルが未設定です。");
+  }
+
+  const baseUrl = useProxy ? SHARED_PROXY_BASE_URL : aiSettings.baseUrl;
+  const url = `${baseUrl.replace(/\/+$/, "")}/chat/completions`;
+
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  if (useProxy) {
+    headers["X-App-Secret"] = SHARED_PROXY_APP_SECRET;
+    headers["X-License-Code"] = billing.licenseCode || "";
+  } else {
+    headers["Authorization"] = `Bearer ${aiSettings.apiKey}`;
+  }
+
+  let res: Response;
+  try {
+    res = await fetch(url, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        model: aiSettings.model,
+        messages: [
+          { role: "system", content: systemPrompt },
+          { role: "user", content: userPrompt },
+        ],
+        temperature: 0.3,
+        max_tokens: 300,
+        stream: false,
+      }),
+    });
+  } catch {
+    throw new AiRequestError("AIサーバーに接続できませんでした。");
+  }
+  if (!res.ok) {
+    throw new AiRequestError(`AIからの応答取得に失敗しました(status ${res.status})。`);
+  }
+  const data = await res.json();
+  const content: string | undefined = data?.choices?.[0]?.message?.content;
+  if (!content) {
+    throw new AiRequestError("AIから応答を受け取れませんでした。");
+  }
+  return content.trim();
+}
+
 export function streamAiReply(
   history: ChatMessage[],
   persona: PersonaSettings,
   aiSettings: AiProviderSettings,
   billing: BillingSettings,
-  onDelta: (fullTextSoFar: string) => void
+  onDelta: (fullTextSoFar: string) => void,
+  memorySummary?: string
 ): { promise: Promise<string>; abort: () => void } {
   let xhr: XMLHttpRequest | undefined;
 
@@ -61,7 +130,7 @@ export function streamAiReply(
       return;
     }
 
-    const systemPrompt = buildSystemPrompt(persona);
+    const systemPrompt = buildSystemPrompt(persona, memorySummary);
     // 直近のやり取りのみをコンテキストとして送る(トークン節約・無料枠対策)
     const recent = history.slice(-16).map((m) => ({
       role: m.role === "assistant" ? "assistant" : "user",

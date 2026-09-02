@@ -37,6 +37,8 @@ export async function loadSettings(): Promise<AppSettings> {
       },
       ai: { ...DEFAULT_SETTINGS.ai, ...parsed.ai },
       billing: { ...DEFAULT_SETTINGS.billing, ...parsed.billing },
+      google: { ...DEFAULT_SETTINGS.google, ...parsed.google },
+      userMemory: { ...DEFAULT_SETTINGS.userMemory, ...parsed.userMemory },
       theme: {
         ...DEFAULT_SETTINGS.theme,
         ...parsed.theme,

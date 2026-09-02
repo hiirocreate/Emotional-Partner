@@ -11,7 +11,7 @@
  */
 
 /** Cloudflare Workersのデプロイ先URL。例: https://kokorotalk-proxy.your-name.workers.dev/v1 */
-export const SHARED_PROXY_BASE_URL = "https://kokorotalk-proxy.h-onoue-test.workers.dev/v1";
+export const SHARED_PROXY_BASE_URL = "";
 
 /**
  * プロキシへのアクセスを軽くゲートするための共有シークレット。
@@ -24,7 +24,7 @@ export const SHARED_PROXY_BASE_URL = "https://kokorotalk-proxy.h-onoue-test.work
  * 悪用が心配な場合は、後述のレート制限(Cloudflare Workers Rate Limiting)を
  * あわせて設定してください。
  */
-export const SHARED_PROXY_APP_SECRET = "kokorononakahanozokenai";
+export const SHARED_PROXY_APP_SECRET = "";
 
 /** 共有プロキシが利用可能かどうか(値が設定されているか)を返す */
 export function isSharedProxyConfigured(): boolean {
@@ -39,26 +39,72 @@ export function isSharedProxyConfigured(): boolean {
  * アプリ側はこのURLの末尾に `?client_reference_id=<この端末のコード>` を自動的に
  * 付け加えて開くため、ここには素のPayment LinkのURLだけを設定すればよい。
  */
-export const BILLING_SUBSCRIBE_URL = "https://buy.stripe.com/test_fZufZhaZu0dHbCXdM8dUY00";
+export const BILLING_SUBSCRIBE_URL = "";
 
 /** 有料プランの決済リンクが設定済みかどうか */
 export function isBillingConfigured(): boolean {
   return Boolean(BILLING_SUBSCRIBE_URL);
 }
 
-
 /**
  * アプリ配布者(開発者)が管理する共有VOICEVOXサーバーのURL。
  *
  * 「備え付けのAI」と同じ考え方で、有料プラン加入者(または管理者)が
  * 自分でVOICEVOXサーバーを用意しなくても使えるようにするための仕組み。
+ * voicevox-server/README.md の手順でホスティングしたVOICEVOX ENGINEの
+ * HTTPS URLをここに設定してください(例: https://your-name.duckdns.org)。
+ *
  * 有料プラン加入者(または管理者)が設定画面でVOICEVOXへの接続先を
  * まだ何も設定していない場合、このURLへ自動的に接続されます。
  * (自分専用のVOICEVOXサーバーを使いたい人は、設定画面で個別に上書きできます)
  */
-export const SHARED_VOICEVOX_URL = "https://8.235.85.246.nip.io";
+export const SHARED_VOICEVOX_URL = "";
 
 /** 共有VOICEVOXサーバーが設定済みかどうか */
 export function isSharedVoicevoxConfigured(): boolean {
   return Boolean(SHARED_VOICEVOX_URL);
 }
+
+/**
+ * Googleアカウント連携(履歴・記憶の同期、README「7.」参照)の設定。
+ *
+ * Google Cloud ConsoleでOAuthクライアントを2つ作成し、それぞれのクライアントIDを
+ * ここに設定してください:
+ *
+ * - GOOGLE_WEB_CLIENT_ID: 種類「ウェブ アプリケーション」のクライアントID。
+ *   Web版のログイン(lib/googleAuth.web.ts, PKCE方式)と、Android版の
+ *   `GoogleSignin.configure({ webClientId })` の両方で使う共通の値。
+ * - Android版はこのクライアントIDに加えて、種類「Android」のOAuthクライアントを
+ *   作成し、パッケージ名(com.example.kokorotalk)とSHA-1証明書フィンガープリントを
+ *   登録しておく必要があります(コード上に直接設定する値はありません。
+ *   Google Play servicesがビルドの署名から自動判定します)。
+ */
+export const GOOGLE_WEB_CLIENT_ID = "";
+
+/**
+ * 上記「ウェブ アプリケーション」クライアントに発行されるクライアントシークレット。
+ * Web版のログイン(lib/googleAuth.web.ts)でのみ使用する(Android版はネイティブの
+ * Google Sign-Inライブラリが別方式で認証するため使わない)。
+ *
+ * 注意: GoogleのOAuthは「ウェブ アプリケーション」種別のクライアントである限り、
+ * PKCEを使っていてもトークン交換時にこのシークレットを要求してくる仕様になっています
+ * (2026年時点、Googleの公式な仕様上の制約)。そのためこの値はアプリのWebビルドに
+ * 埋め込まれ、本当の意味での秘密情報にはなりません
+ * (SHARED_PROXY_APP_SECRETと同様の考え方です)。この値の漏洩で悪用できるのは
+ * 「このアプリのふりをしてOAuth認可画面を表示させる」程度で、他人のGoogle
+ * アカウントのデータには(利用者本人の同意なしには)アクセスできません。
+ */
+export const GOOGLE_WEB_CLIENT_SECRET = "";
+
+/** Googleアカウント連携が設定済みかどうか */
+export function isGoogleSyncConfigured(): boolean {
+  return Boolean(GOOGLE_WEB_CLIENT_ID);
+}
+
+/**
+ * Googleドライブに要求するOAuthスコープ。
+ * `drive.appdata` は「このアプリ専用の非公開領域」のみへのアクセス権で、
+ * 利用者の通常のドライブ内ファイルには一切触れられない(Googleの審査区分でも
+ * 「機密性の低いスコープ」扱いで、追加のセキュリティ審査(CASA)は不要)。
+ */
+export const GOOGLE_DRIVE_SCOPES = ["https://www.googleapis.com/auth/drive.appdata"];

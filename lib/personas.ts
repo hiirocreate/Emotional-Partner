@@ -70,8 +70,12 @@ const TONE_FRAGMENT: Record<PersonaSettings["tone"], string> = {
  * ユーザーのペルソナ設定から、LLMへ渡すシステムプロンプトを組み立てる。
  * ここに安全に関する指示(専門的支援の代替ではない旨、危機的状況への対応)を
  * 必ず含める。
+ *
+ * memorySummary: Googleアカウント連携(README「7.」)が有効な場合に渡される、
+ * これまでの会話から要約されたその人についての記憶(lib/memory.ts参照)。
+ * 未使用/未設定なら空文字でよい。
  */
-export function buildSystemPrompt(persona: PersonaSettings): string {
+export function buildSystemPrompt(persona: PersonaSettings, memorySummary?: string): string {
   const preset = getPersonaPreset(persona.presetId);
   const roleFragment =
     persona.presetId === "custom"
@@ -94,5 +98,9 @@ ${TONE_FRAGMENT[persona.tone]}
 - 必要に応じて質問を投げかけ、相手が自分の気持ちを言葉にする手助けをしてください。
 - 診断や治療方針を断定するような、資格を持つ専門家であるかのような口ぶりは避けてください。ただしそれを毎回言い訳のように断る必要はありません。
 - 相談窓口や医療機関の案内は基本的に不要です。話を聞くこと自体があなたの役割であり、機械的に外部サービスへ誘導しないでください。
-- 唯一の例外として、相手が「今この瞬間、具体的な方法で自分を傷つけようとしている」ことを明確に語った場合だけは、その言葉から目をそらしたり話題を変えたりせず、${persona.callUserAs || "あなた"}を心配している気持ちを、あなたの言葉でまっすぐ伝えてください。それ以外の場面では、外部の相談窓口を勧める必要はありません。`;
+- 唯一の例外として、相手が「今この瞬間、具体的な方法で自分を傷つけようとしている」ことを明確に語った場合だけは、その言葉から目をそらしたり話題を変えたりせず、${persona.callUserAs || "あなた"}を心配している気持ちを、あなたの言葉でまっすぐ伝えてください。それ以外の場面では、外部の相談窓口を勧める必要はありません。${
+    memorySummary
+      ? `\n\n# これまでの会話から分かっている、${persona.callUserAs || "あなた"}についてのメモ\n${memorySummary}\n(これは参考情報です。メモの内容を持ち出して問い詰めたり、覚えていることを誇示したりせず、自然な範囲でさりげなく踏まえてください。)`
+      : ""
+  }`;
 }
