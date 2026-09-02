@@ -17,7 +17,9 @@ import { ChatBubble } from "../components/ChatBubble";
 import { VoiceButton } from "../components/VoiceButton";
 import { streamAiReply, AiConfigError, AiRequestError } from "../lib/ai";
 import { hasPaidAccess } from "../lib/billing";
-import { loadHistory, loadSettings, saveHistory } from "../lib/storage";
+import { MEMORY_UPDATE_INTERVAL_MESSAGES, updateUserMemory } from "../lib/memory";
+import { loadHistory, loadSettings, saveHistory, saveSettings } from "../lib/storage";
+import { pullFromDriveIfNewer, pushToDriveInBackground } from "../lib/sync";
 import { resolveThemeColors } from "../lib/theme";
 import { AppSettings, ChatMessage } from "../lib/types";
 import { useVoiceInput } from "../lib/voiceInput";
@@ -61,12 +63,18 @@ export default function ChatScreen() {
   const [errorBanner, setErrorBanner] = useState<string | null>(null);
   const listRef = useRef<FlatList<ChatMessage>>(null);
   const activeStreamRef = useRef<{ abort: () => void } | null>(null);
+  // Googleアカウント連携が有効な場合、直近このくらいメッセージが積み重なったら
+  // AIの記憶(要約)を更新する。アプリ起動中だけ数えればよいので単純なrefでよい。
+  const messagesSinceMemoryUpdateRef = useRef(0);
 
   useEffect(() => {
     (async () => {
       const [s, h] = await Promise.all([loadSettings(), loadHistory()]);
-      setSettings(s);
-      setMessages(h);
+      // Googleドライブ側に、この端末より新しい会話ログ・記憶があれば取り込む
+      // (別端末で続けた会話をこの端末で引き継ぐケース)。
+      const pulled = await pullFromDriveIfNewer(s, h);
+      setSettings(pulled.settings);
+      setMessages(pulled.messages);
     })();
     return () => {
       activeStreamRef.current?.abort();
@@ -129,7 +137,8 @@ export default function ChatScreen() {
             }
             spokenUpTo = consumedUpTo;
           }
-        }
+        },
+        settings.userMemory.summary || undefined
       );
       activeStreamRef.current = { abort };
 
@@ -142,7 +151,30 @@ export default function ChatScreen() {
           inputMode,
           createdAt: Date.now(),
         };
-        persistMessages([...working, aiMsg]);
+        const finalMessages = [...working, aiMsg];
+        persistMessages(finalMessages);
+
+        // Googleアカウント連携が有効なら、会話ログ・記憶をドライブへ反映する
+        // (別端末での引き継ぎ用)。失敗しても会話自体には影響させない。
+        if (settings.google.connected) {
+          messagesSinceMemoryUpdateRef.current += 2; // 利用者発言+AI返答の2件分
+          if (messagesSinceMemoryUpdateRef.current >= MEMORY_UPDATE_INTERVAL_MESSAGES) {
+            messagesSinceMemoryUpdateRef.current = 0;
+            updateUserMemory(settings.userMemory, finalMessages, settings.ai, settings.billing).then(
+              async (result) => {
+                const settingsWithMemory: AppSettings = { ...settings, userMemory: result.memory };
+                await saveSettings(settingsWithMemory);
+                setSettings((prev) => (prev ? { ...prev, userMemory: result.memory } : prev));
+                const pushed = await pushToDriveInBackground(settingsWithMemory, finalMessages);
+                setSettings((prev) => (prev ? { ...prev, google: pushed.google } : prev));
+              }
+            );
+          } else {
+            pushToDriveInBackground(settings, finalMessages).then((pushed) => {
+              setSettings((prev) => (prev ? { ...prev, google: pushed.google } : prev));
+            });
+          }
+        }
 
         if (shouldSpeak) {
           // 句読点が付かないまま終わった末尾の断片(最後の一文など)を読み上げる

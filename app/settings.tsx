@@ -27,11 +27,13 @@ import {
 import { LOCAL_VOICEVOX_CATALOG } from "../lib/voicevoxVvmCatalog";
 import {
   isBillingConfigured,
+  isGoogleSyncConfigured,
   isSharedProxyConfigured,
   isSharedVoicevoxConfigured,
   SHARED_VOICEVOX_URL,
 } from "../lib/config";
 import { connectOpenRouterAccount } from "../lib/openrouterOAuth";
+import { connectGoogleAccount, disconnectGoogleAccount, GoogleAuthError } from "../lib/googleAuth";
 import {
   BillingCheckError,
   buildSubscribeUrl,
@@ -163,6 +165,8 @@ export default function SettingsScreen() {
   const [localVoicevoxError, setLocalVoicevoxError] = useState<string | null>(null);
   const [customPersonaText, setCustomPersonaText] = useState("");
   const [openRouterConnecting, setOpenRouterConnecting] = useState(false);
+  const [googleAccountConnecting, setGoogleAccountConnecting] = useState(false);
+  const [googleAccountError, setGoogleAccountError] = useState<string | null>(null);
   const [licenseCodeDraft, setLicenseCodeDraft] = useState("");
   const [billingChecking, setBillingChecking] = useState(false);
   const [customColorDraft, setCustomColorDraft] = useState<CustomThemeColors>({
@@ -620,6 +624,57 @@ export default function SettingsScreen() {
             : "この端末で利用できる音声が見つかりませんでした。"
         ),
     });
+  };
+
+  const handleGoogleConnect = async () => {
+    if (googleAccountConnecting) return;
+    setGoogleAccountConnecting(true);
+    setGoogleAccountError(null);
+    try {
+      const result = await connectGoogleAccount();
+      if (result) {
+        await persist({
+          ...settings,
+          google: { connected: true, email: result.email, lastSyncedAt: settings.google.lastSyncedAt },
+        });
+        showAlert(
+          "接続しました",
+          "会話ログとAIの記憶を、このGoogleアカウントのドライブ(アプリ専用の非公開領域)に同期します。別の端末で同じアカウントにログインすると引き継げます。"
+        );
+      }
+      // resultがnull(利用者がキャンセル)の場合は何もしない
+    } catch (e) {
+      setGoogleAccountError(
+        e instanceof GoogleAuthError || e instanceof Error
+          ? e.message
+          : "接続に失敗しました。しばらくしてから再度お試しください。"
+      );
+    } finally {
+      setGoogleAccountConnecting(false);
+    }
+  };
+
+  const handleGoogleDisconnect = () => {
+    showConfirm(
+      "Googleアカウント連携を解除しますか？",
+      "この端末との同期が止まります(Googleドライブ上のデータ自体は削除されません)。",
+      "解除する",
+      async () => {
+        await disconnectGoogleAccount();
+        await persist({ ...settings, google: { connected: false, email: null, lastSyncedAt: null } });
+      },
+      true
+    );
+  };
+
+  const handleClearMemory = () => {
+    showConfirm(
+      "AIの記憶を削除しますか？",
+      "これまでの会話から要約された記憶を削除します(会話ログ自体は削除されません)。",
+      "削除する",
+      () => persist({ ...settings, userMemory: { summary: "", updatedAt: null } }),
+      true
+    );
   };
 
   const handleClearHistory = () => {
@@ -1294,6 +1349,53 @@ export default function SettingsScreen() {
             ) : null}
           </>
         )}
+      </Section>
+
+      <Section title="Googleアカウント連携(履歴・AIの記憶を引き継ぐ)">
+        <Text style={styles.smallHelper}>
+          Googleアカウントでログインすると、会話ログとAIが要約した記憶(呼び方や最近の話題など)を、そのアカウント自身のGoogleドライブ(このアプリ専用の非公開領域=通常のドライブ画面には表示されません)に保存します。別の端末で同じGoogleアカウントにログインすると、そこから会話を続けられます。開発者のサーバーには一切送信・保存されません。
+        </Text>
+
+        {!isGoogleSyncConfigured() ? (
+          <Text style={styles.smallHelper}>Google連携は未設定です(アプリ配布者による設定待ちです)。</Text>
+        ) : settings.google.connected ? (
+          <>
+            <Text style={styles.okHelper}>
+              ✓ {settings.google.email ?? "Googleアカウント"} に接続中
+            </Text>
+            <Text style={styles.smallHelper}>
+              {settings.google.lastSyncedAt
+                ? `最終同期: ${new Date(settings.google.lastSyncedAt).toLocaleString("ja-JP")}`
+                : "まだ同期していません(会話を送信すると自動的に同期されます)"}
+            </Text>
+            <Pressable style={styles.dangerButton} onPress={handleGoogleDisconnect}>
+              <Text style={styles.dangerButtonText}>連携を解除する</Text>
+            </Pressable>
+          </>
+        ) : (
+          <Pressable
+            style={[styles.primaryButton, googleAccountConnecting && styles.primaryButtonDisabled]}
+            onPress={handleGoogleConnect}
+            disabled={googleAccountConnecting}
+          >
+            {googleAccountConnecting ? (
+              <ActivityIndicator size="small" color="#fff" />
+            ) : (
+              <Text style={styles.primaryButtonText}>🔗 Googleでログインして連携する</Text>
+            )}
+          </Pressable>
+        )}
+        {googleAccountError ? <Text style={styles.errorHelper}>{googleAccountError}</Text> : null}
+
+        {settings.userMemory.summary ? (
+          <View style={styles.quickSetupBox}>
+            <Text style={styles.quickSetupTitle}>AIが覚えていること</Text>
+            <Text style={styles.smallHelper}>{settings.userMemory.summary}</Text>
+            <Pressable style={styles.secondaryButton} onPress={handleClearMemory}>
+              <Text style={styles.secondaryButtonText}>この記憶を削除する</Text>
+            </Pressable>
+          </View>
+        ) : null}
       </Section>
 
       <Section title="データ">
