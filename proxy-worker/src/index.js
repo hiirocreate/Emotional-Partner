@@ -1,16 +1,34 @@
 /**
- * こころトーク 共有プロキシ (Cloudflare Workers)
+ * EmPa(旧こころトーク) 共有プロキシ (Cloudflare Workers)
  *
  * 目的: アプリの利用者が各自でGroqのAPIキーを発行しなくても対話AIを使えるように、
  * 開発者(配布者)自身のAPIキーをこのWorkerの環境変数(シークレット)にだけ保持し、
  * アプリからのリクエストをGroqへ中継する。
  *
- * 【有料プラン(サブスクリプション)】
+ * 【有料プラン(サブスクリプション)/ 管理者判定】
  * 「備え付けのAI」(この共有プロキシ経由の対話AI)を使うには、有料プラン加入
- * (Stripeでのサブスク契約)または管理者コードが必要。/v1/billing/status で
- * ライセンスコードの状態を確認し、/v1/chat/completions もそのコードで
- * ゲートする。/v1/billing/webhook はStripeからのWebhookを受け取り、
- * KV(SUBSCRIBERS)にサブスク状態を反映する。
+ * (Stripeでのサブスク契約)または管理者権限が必要。判定は**Googleアカウントの
+ * メールアドレス**単位で行う(以前のバージョンにあった「端末ごとのランダムな
+ * コード」方式は廃止した)。
+ *
+ * 具体的には、アプリ側でGoogleサインイン(lib/googleAuth.ts / .web.ts)した際に
+ * 得られる「IDトークン」(Googleが署名したJWT)を、リクエストのたびに
+ * `X-Google-Id-Token` ヘッダーで送ってもらい、このWorker側で
+ * googleIdToken.js の verifyGoogleIdToken() を使って検証する:
+ *   - 署名がGoogleの公開鍵(JWKS)と一致するか
+ *   - 有効期限内か / 発行者(iss)がGoogleか / 宛先(aud)がこのアプリのクライアントIDか
+ *   - メールアドレスが確認済み(email_verified)か
+ * これら全てを満たした場合だけ、トークンに書かれたメールアドレスを信頼する。
+ * 単にクライアントが「私はこのメールです」と自己申告するだけの仕組みだと、
+ * 他人(特に管理者)のメールアドレスを名乗るだけで権限を詐称できてしまうため、
+ * この検証は省略できない(googleIdToken.js に検証ロジックのテストがある:
+ * proxy-worker/test-jwt-verify.mjs 参照)。
+ *
+ * - `/v1/billing/status`: 検証済みメールアドレスの課金状態を返す。
+ * - `/v1/chat/completions`: 同じ検証を経てから中継する。
+ * - `/v1/billing/webhook`: Stripeからのwebhookを受け取り、KV(SUBSCRIBERS)に
+ *   「そのメールアドレスは有効なサブスクか」を反映する(Stripe Checkoutが
+ *   購入者のメールアドレスを収集してくれるため、こちら側で追加の入力は不要)。
  *
  * セキュリティ上の注意:
  * - X-App-Secret ヘッダーによる簡易ゲートを設けているが、これはアプリのビルドに
@@ -19,19 +37,21 @@
  * - 呼び出せるモデルは ALLOWED_MODELS に列挙したものだけに制限している
  *   (任意のモデル名を指定されて高コストなモデルを叩かれることを防ぐため)。
  * - wrangler.toml の [[ratelimits]] で簡易レート制限もかけている。
- * - ADMIN_CODE はビルドに埋め込まれず、サーバー側のシークレットとしてのみ
- *   保持される(利用者が入力し、その都度サーバーに問い合わせて照合する)ため、
- *   X-App-Secretよりは強い保護になっている。
+ * - 管理者判定(ADMIN_EMAILS)・サブスク判定は、上記のGoogle IDトークン検証を
+ *   通った後のメールアドレスでのみ行われるため、X-App-Secretよりずっと強い
+ *   保護になっている。
  *
  * これらはテスト・小規模公開向けの軽量な対策であり、悪意ある大規模アクセスを
  * 完全に防げるものではない。利用者が増えて心配な場合は、Cloudflare Access等での
  * 追加の保護や、そもそも利用者ごとに自分のAPIキーを使う運用への切り替えも検討すること。
  */
 
+import { verifyGoogleIdToken } from "./googleIdToken.js";
+
 const UPSTREAM_BASE_URL = "https://api.groq.com/openai/v1";
 
 // アプリ側の設定画面(PROXY_MODEL_PRESETS)と一致させること
-const ALLOWED_MODELS = new Set(["llama-3.1-8b-instant", "llama-3.3-70b-versatile"]);
+const ALLOWED_MODELS = new Set(["openai/gpt-oss-20b", "openai/gpt-oss-120b"]);
 
 const MAX_TOKENS_CAP = 800;
 
@@ -44,7 +64,7 @@ export default {
     const url = new URL(request.url);
 
     if (url.pathname === "/v1/billing/status" && request.method === "GET") {
-      return handleBillingStatus(request, env, url);
+      return handleBillingStatus(request, env);
     }
     if (url.pathname === "/v1/billing/webhook" && request.method === "POST") {
       return handleStripeWebhook(request, env);
@@ -75,14 +95,14 @@ async function handleChatCompletions(request, env) {
     return jsonResponse({ error: { message: "unauthorized" } }, 401);
   }
 
-  const licenseCode = request.headers.get("x-license-code") || "";
-  const license = await checkLicense(licenseCode, env);
+  const idToken = request.headers.get("x-google-id-token") || "";
+  const license = await checkLicenseByIdToken(idToken, env);
   if (license.status !== "admin" && license.status !== "active") {
     return jsonResponse(
       {
         error: {
           message:
-            "備え付けのAI(共有プロキシ)は有料プランの方のみご利用いただけます。設定画面の「利用プラン」から加入するか、管理者コードを入力してください。",
+            "備え付けのAI(共有プロキシ)は有料プランの方のみご利用いただけます。設定画面からGoogleアカウントで連携し、「利用プラン」から加入してください。",
           code: "subscription_required",
         },
       },
@@ -168,29 +188,48 @@ async function handleChatCompletions(request, env) {
 }
 
 // ---------------------------------------------------------------------------
-// 有料プラン(サブスクリプション)
+// 有料プラン(サブスクリプション)/ 管理者判定 (メールアドレス単位)
 // ---------------------------------------------------------------------------
 
 /**
- * ライセンスコードの状態を判定する。
- * - env.ADMIN_CODE と一致する場合は無条件で "admin"(課金不要・全機能開放)。
- * - それ以外は KV(env.SUBSCRIBERS) の `code:<code>` レコードを見て
- *   有効なサブスクリプションかどうかを判定する。
+ * GoogleのJWKS取得にCloudflareのエッジキャッシュを効かせるfetch。
+ * Googleの証明書はそう頻繁には変わらないため、6時間キャッシュしておけば十分。
  */
-async function checkLicense(code, env) {
-  const trimmed = (code || "").trim();
-  if (!trimmed) return { status: "none", expiresAt: null };
+function fetchJwks(url) {
+  return fetch(url, { cf: { cacheTtl: 21600, cacheEverything: true } });
+}
 
-  if (env.ADMIN_CODE && trimmed === env.ADMIN_CODE) {
+/**
+ * IDトークンを検証し、有効なら「そのメールアドレスの課金状態」を判定する。
+ * - env.ADMIN_EMAILS(カンマ区切り)に含まれるメールなら無条件で "admin"。
+ * - それ以外は KV(env.SUBSCRIBERS) の `email:<メールアドレス>` レコードを見て
+ *   有効なサブスクリプションかどうかを判定する。
+ * - IDトークンが無い/検証に失敗した場合は "none"(未認証として扱う)。
+ */
+async function checkLicenseByIdToken(idToken, env) {
+  if (!env.GOOGLE_WEB_CLIENT_ID) {
+    // サーバー側の設定未了(README「7.」参照)。安全側に倒して常に未加入扱い。
+    return { status: "none", expiresAt: null };
+  }
+  const verified = await verifyGoogleIdToken(idToken, env.GOOGLE_WEB_CLIENT_ID, fetchJwks);
+  if (!verified) return { status: "none", expiresAt: null };
+
+  const email = verified.email;
+
+  const adminEmails = (env.ADMIN_EMAILS || "")
+    .split(",")
+    .map((e) => e.trim().toLowerCase())
+    .filter(Boolean);
+  if (adminEmails.includes(email)) {
     return { status: "admin", expiresAt: null };
   }
 
   if (!env.SUBSCRIBERS) {
-    // KVバインディング未設定(サブスク機能セットアップ前)。管理者コード以外は常に未加入扱い。
+    // KVバインディング未設定(サブスク機能セットアップ前)。管理者以外は常に未加入扱い。
     return { status: "none", expiresAt: null };
   }
 
-  const raw = await env.SUBSCRIBERS.get(`code:${trimmed}`);
+  const raw = await env.SUBSCRIBERS.get(`email:${email}`);
   if (!raw) return { status: "none", expiresAt: null };
 
   let record;
@@ -208,19 +247,21 @@ async function checkLicense(code, env) {
   return { status: "none", expiresAt: null };
 }
 
-async function handleBillingStatus(request, env, url) {
+async function handleBillingStatus(request, env) {
   if (!env.APP_SHARED_SECRET || request.headers.get("x-app-secret") !== env.APP_SHARED_SECRET) {
     return jsonResponse({ error: { message: "unauthorized" } }, 401);
   }
-  const code = url.searchParams.get("code") || "";
-  const result = await checkLicense(code, env);
+  const idToken = request.headers.get("x-google-id-token") || "";
+  const result = await checkLicenseByIdToken(idToken, env);
   return jsonResponse(result, 200);
 }
 
 /**
- * Stripeからのwebhookを受け取り、KVのサブスク状態を更新する。
+ * Stripeからのwebhookを受け取り、KVのサブスク状態をメールアドレス単位で更新する。
  * 対応イベント:
- *  - checkout.session.completed: 初回決済完了。client_reference_id をコードとして紐付ける。
+ *  - checkout.session.completed: 初回決済完了。購入者のメールアドレス
+ *    (session.customer_details.email、Stripe Checkoutが標準で収集する)を
+ *    キーとして紐付ける。
  *  - customer.subscription.updated: 更新・状態変化(有効/延滞/トライアル等)を反映。
  *  - customer.subscription.deleted: 解約時に無効化。
  */
@@ -251,14 +292,16 @@ async function handleStripeWebhook(request, env) {
     switch (event.type) {
       case "checkout.session.completed": {
         const session = event.data?.object ?? {};
-        const code = (session.client_reference_id || "").trim();
+        const email = normalizeEmail(
+          session.customer_details?.email || session.customer_email || ""
+        );
         const subscriptionId = session.subscription;
-        if (code && subscriptionId) {
+        if (email && subscriptionId) {
           await env.SUBSCRIBERS.put(
-            `code:${code}`,
+            `email:${email}`,
             JSON.stringify({ active: true, subscriptionId, currentPeriodEnd: null })
           );
-          await env.SUBSCRIBERS.put(`sub:${subscriptionId}`, code);
+          await env.SUBSCRIBERS.put(`sub:${subscriptionId}`, email);
         }
         break;
       }
@@ -270,10 +313,10 @@ async function handleStripeWebhook(request, env) {
       }
       case "customer.subscription.deleted": {
         const subscription = event.data?.object ?? {};
-        const code = await env.SUBSCRIBERS.get(`sub:${subscription.id}`);
-        if (code) {
+        const email = await env.SUBSCRIBERS.get(`sub:${subscription.id}`);
+        if (email) {
           await env.SUBSCRIBERS.put(
-            `code:${code}`,
+            `email:${email}`,
             JSON.stringify({ active: false, subscriptionId: subscription.id, currentPeriodEnd: null })
           );
         }
@@ -294,8 +337,8 @@ async function handleStripeWebhook(request, env) {
 async function syncSubscriptionRecord(subscription, env) {
   const subscriptionId = subscription.id;
   if (!subscriptionId) return;
-  const code = await env.SUBSCRIBERS.get(`sub:${subscriptionId}`);
-  if (!code) return; // まだcheckout.session.completedを受け取っていない(順序が前後した場合はここでは何もしない)
+  const email = await env.SUBSCRIBERS.get(`sub:${subscriptionId}`);
+  if (!email) return; // まだcheckout.session.completedを受け取っていない(順序が前後した場合はここでは何もしない)
 
   const active = subscription.status === "active" || subscription.status === "trialing";
 
@@ -308,9 +351,13 @@ async function syncSubscriptionRecord(subscription, env) {
   const currentPeriodEnd = typeof currentPeriodEndSec === "number" ? currentPeriodEndSec * 1000 : null;
 
   await env.SUBSCRIBERS.put(
-    `code:${code}`,
+    `email:${email}`,
     JSON.stringify({ active, subscriptionId, currentPeriodEnd })
   );
+}
+
+function normalizeEmail(email) {
+  return (email || "").trim().toLowerCase();
 }
 
 /**
@@ -367,7 +414,7 @@ function corsHeaders() {
   return {
     "Access-Control-Allow-Origin": "*",
     "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-    "Access-Control-Allow-Headers": "Content-Type, X-App-Secret, X-License-Code",
+    "Access-Control-Allow-Headers": "Content-Type, X-App-Secret, X-Google-Id-Token",
   };
 }
 
