@@ -17,6 +17,7 @@ import { ChatBubble } from "../components/ChatBubble";
 import { VoiceButton } from "../components/VoiceButton";
 import { streamAiReply, AiConfigError, AiRequestError } from "../lib/ai";
 import { hasPaidAccess } from "../lib/billing";
+import { getGoogleIdToken } from "../lib/googleAuth";
 import { MEMORY_UPDATE_INTERVAL_MESSAGES, updateUserMemory } from "../lib/memory";
 import { loadHistory, loadSettings, saveHistory, saveSettings } from "../lib/storage";
 import { pullFromDriveIfNewer, pushToDriveInBackground } from "../lib/sync";
@@ -25,7 +26,7 @@ import { AppSettings, ChatMessage } from "../lib/types";
 import { useVoiceInput } from "../lib/voiceInput";
 import { enqueueSpeech, extractSpeakableChunks, speakText, stopSpeaking } from "../lib/voiceOutput";
 
-/** VOICEVOXの利用にはサブスク(または管理者コード)が必要なため、権利がない場合は端末内蔵ボイスへ自動フォールバックする */
+/** VOICEVOXの利用にはサブスク(または管理者)が必要なため、権利がない場合は端末内蔵ボイスへ自動フォールバックする */
 function resolveVoiceSettings(settings: AppSettings) {
   if (settings.voice.provider === "voicevox" && !hasPaidAccess(settings.billing)) {
     return { ...settings.voice, provider: "system" as const };
@@ -123,6 +124,10 @@ export default function ChatScreen() {
       const shouldSpeak = settings.voice.autoSpeak || inputMode === "voice";
       let spokenUpTo = 0;
 
+      // 備え付けのAI(共有プロキシ)を使う場合のみ、課金状態の証明に使う
+      // Google IDトークンを取得する(自分のAPIキーを使うモードでは不要)。
+      const googleIdToken = settings.ai.mode === "proxy" ? await getGoogleIdToken() : null;
+
       const { promise, abort } = streamAiReply(
         working,
         settings.persona,
@@ -138,7 +143,8 @@ export default function ChatScreen() {
             spokenUpTo = consumedUpTo;
           }
         },
-        settings.userMemory.summary || undefined
+        settings.userMemory.summary || undefined,
+        googleIdToken
       );
       activeStreamRef.current = { abort };
 
@@ -160,7 +166,13 @@ export default function ChatScreen() {
           messagesSinceMemoryUpdateRef.current += 2; // 利用者発言+AI返答の2件分
           if (messagesSinceMemoryUpdateRef.current >= MEMORY_UPDATE_INTERVAL_MESSAGES) {
             messagesSinceMemoryUpdateRef.current = 0;
-            updateUserMemory(settings.userMemory, finalMessages, settings.ai, settings.billing).then(
+            updateUserMemory(
+              settings.userMemory,
+              finalMessages,
+              settings.ai,
+              settings.billing,
+              googleIdToken
+            ).then(
               async (result) => {
                 const settingsWithMemory: AppSettings = { ...settings, userMemory: result.memory };
                 await saveSettings(settingsWithMemory);

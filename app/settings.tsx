@@ -33,14 +33,13 @@ import {
   SHARED_VOICEVOX_URL,
 } from "../lib/config";
 import { connectOpenRouterAccount } from "../lib/openrouterOAuth";
-import { connectGoogleAccount, disconnectGoogleAccount, GoogleAuthError } from "../lib/googleAuth";
 import {
-  BillingCheckError,
-  buildSubscribeUrl,
-  checkLicenseStatus,
-  generateLicenseCode,
-  hasPaidAccess,
-} from "../lib/billing";
+  connectGoogleAccount,
+  disconnectGoogleAccount,
+  getGoogleIdToken,
+  GoogleAuthError,
+} from "../lib/googleAuth";
+import { BillingCheckError, buildSubscribeUrl, checkBillingStatus, hasPaidAccess } from "../lib/billing";
 import { clearHistory, loadSettings, saveSettings } from "../lib/storage";
 import {
   COLOR_SWATCHES,
@@ -167,7 +166,6 @@ export default function SettingsScreen() {
   const [openRouterConnecting, setOpenRouterConnecting] = useState(false);
   const [googleAccountConnecting, setGoogleAccountConnecting] = useState(false);
   const [googleAccountError, setGoogleAccountError] = useState<string | null>(null);
-  const [licenseCodeDraft, setLicenseCodeDraft] = useState("");
   const [billingChecking, setBillingChecking] = useState(false);
   const [customColorDraft, setCustomColorDraft] = useState<CustomThemeColors>({
     ...DEFAULT_THEME_COLORS,
@@ -176,11 +174,6 @@ export default function SettingsScreen() {
   useEffect(() => {
     (async () => {
       let s = await loadSettings();
-      // この端末用のライセンスコードがまだ無ければ生成して保存しておく
-      if (!s.billing.licenseCode) {
-        s = { ...s, billing: { ...s.billing, licenseCode: generateLicenseCode() } };
-        await saveSettings(s);
-      }
       // 有料プラン(または管理者)で、まだVOICEVOXの接続先を自分で設定していない場合は、
       // 「備え付けのAI」と同じ考え方で、共有VOICEVOXサーバーへ自動的に接続する。
       // (自分専用のVOICEVOXサーバーを使いたい人は、下のURL欄で個別に上書きできる)
@@ -195,7 +188,6 @@ export default function SettingsScreen() {
       setCustomPersonaText(s.persona.customDescription);
       setVoicevoxUrlDraft(s.voice.voicevox.baseUrl);
       setGoogleApiKeyDraft(s.voice.google.apiKey);
-      setLicenseCodeDraft(s.billing.licenseCode);
       setCustomColorDraft(s.theme.customColors ?? { ...DEFAULT_THEME_COLORS });
       const v = await listAvailableVoices();
       setSystemVoices(v);
@@ -250,7 +242,7 @@ export default function SettingsScreen() {
     if ((provider === "voicevox" || provider === "voicevox_local") && !hasPaidAccess(settings.billing)) {
       showAlert(
         "有料プランが必要です",
-        "VOICEVOX(端末にない読み上げボイス)のご利用には、有料プランへの加入または管理者コードの入力が必要です。下の「利用プラン」欄からご確認ください。"
+        "VOICEVOX(端末にない読み上げボイス)のご利用には、有料プランへの加入が必要です。下の「利用プラン」欄からご確認ください。"
       );
       return;
     }
@@ -409,7 +401,7 @@ export default function SettingsScreen() {
     if (mode === "proxy" && settings.ai.mode !== "proxy" && !hasPaidAccess(settings.billing)) {
       showAlert(
         "有料プランが必要です",
-        "備え付けのAI(共有プロキシ)のご利用には、有料プランへの加入または管理者コードの入力が必要です。上の「利用プラン」欄からご確認いただくか、「自分のAPIキーを使う」をお使いください。"
+        "備え付けのAI(共有プロキシ)のご利用には、有料プランへの加入が必要です。上の「利用プラン」欄からご確認いただくか、「自分のAPIキーを使う」をお使いください。"
       );
       return;
     }
@@ -511,25 +503,35 @@ export default function SettingsScreen() {
   };
   const onBlurModel = () => persist(settings);
 
-  const onChangeLicenseCode = (v: string) => setLicenseCodeDraft(v);
-  const onBlurLicenseCode = () => {
-    if (licenseCodeDraft.trim() === settings.billing.licenseCode) return;
-    persist({
-      ...settings,
-      billing: { ...settings.billing, licenseCode: licenseCodeDraft.trim(), status: "unknown", expiresAt: null },
-    });
+  /**
+   * 課金状態の確認に使う、検証済みメールアドレス入りのIDトークンを取得する。
+   * Google未連携/トークン期限切れ(Web版で約1時間)の場合は null を返す。
+   */
+  const getBillingIdToken = async (): Promise<string | null> => {
+    if (!settings.google.connected) return null;
+    return getGoogleIdToken();
   };
 
   const handleCheckBillingStatus = async () => {
     if (billingChecking) return;
-    const code = licenseCodeDraft.trim();
+    if (!settings.google.connected) {
+      showAlert("Googleアカウント連携が必要です", "下の「Googleアカウント連携」からログインしてください。");
+      return;
+    }
     setBillingChecking(true);
     try {
-      const result = await checkLicenseStatus(code);
+      const idToken = await getBillingIdToken();
+      if (!idToken) {
+        showAlert(
+          "サインインが必要です",
+          "Google連携の認証が切れています。下の「Googleアカウント連携」から再度サインインしてください。"
+        );
+        return;
+      }
+      const result = await checkBillingStatus(idToken);
       await persist({
         ...settings,
         billing: {
-          licenseCode: code,
           status: result.status,
           expiresAt: result.expiresAt,
           lastCheckedAt: Date.now(),
@@ -542,7 +544,7 @@ export default function SettingsScreen() {
       } else {
         showAlert(
           "未加入です",
-          "このコードでは有料プランが確認できませんでした。加入直後の場合は、反映まで数分かかることがあります。"
+          "このGoogleアカウントでは有料プランが確認できませんでした。加入直後の場合は、反映まで数分かかることがあります。"
         );
       }
     } catch (e) {
@@ -563,20 +565,11 @@ export default function SettingsScreen() {
       );
       return;
     }
-    Linking.openURL(buildSubscribeUrl(settings.billing.licenseCode));
-  };
-
-  const handleRegenerateLicenseCode = () => {
-    showConfirm(
-      "新しいコードを発行しますか？",
-      "現在のコードで既に加入済みの場合、再度この操作を行うと状態確認ができなくなることがあります。通常は操作不要です。",
-      "発行する",
-      () => {
-        const next = generateLicenseCode();
-        setLicenseCodeDraft(next);
-        persist({ ...settings, billing: { licenseCode: next, status: "unknown", expiresAt: null, lastCheckedAt: null } });
-      }
-    );
+    if (!settings.google.connected) {
+      showAlert("Googleアカウント連携が必要です", "下の「Googleアカウント連携」からログインしてください。");
+      return;
+    }
+    Linking.openURL(buildSubscribeUrl(settings.google.email));
   };
 
   const onSelectThemePreset = (id: ThemePresetId) => {
@@ -633,13 +626,32 @@ export default function SettingsScreen() {
     try {
       const result = await connectGoogleAccount();
       if (result) {
-        await persist({
+        let nextSettings: AppSettings = {
           ...settings,
           google: { connected: true, email: result.email, lastSyncedAt: settings.google.lastSyncedAt },
-        });
+        };
+        // 接続直後に、そのままこのアカウントでの課金状態も確認しておく
+        // (「利用プラン」欄で改めて「状態を確認」を押させる手間を減らすため)。
+        if (isBillingConfigured() && result.idToken) {
+          try {
+            const billingResult = await checkBillingStatus(result.idToken);
+            nextSettings = {
+              ...nextSettings,
+              billing: {
+                status: billingResult.status,
+                expiresAt: billingResult.expiresAt,
+                lastCheckedAt: Date.now(),
+              },
+            };
+          } catch {
+            // 課金状態の確認に失敗しても、Google連携自体は成功しているので握りつぶす
+            // (「利用プラン」欄で改めて確認できる)。
+          }
+        }
+        await persist(nextSettings);
         showAlert(
           "接続しました",
-          "会話ログとAIの記憶を、このGoogleアカウントのドライブ(アプリ専用の非公開領域)に同期します。別の端末で同じアカウントにログインすると引き継げます。"
+          "会話ログとAIの記憶を、このGoogleアカウントのドライブ(アプリ専用の非公開領域)に同期します。別の端末で同じアカウントにログインすると引き継げます。有料プランの加入状況も、このアカウント単位で判定されます。"
         );
       }
       // resultがnull(利用者がキャンセル)の場合は何もしない
@@ -657,11 +669,15 @@ export default function SettingsScreen() {
   const handleGoogleDisconnect = () => {
     showConfirm(
       "Googleアカウント連携を解除しますか？",
-      "この端末との同期が止まります(Googleドライブ上のデータ自体は削除されません)。",
+      "この端末との同期が止まります(Googleドライブ上のデータ自体は削除されません)。有料プランに加入中の場合、解除している間は「利用プラン」で状態を確認できなくなります(加入自体は解約されません)。",
       "解除する",
       async () => {
         await disconnectGoogleAccount();
-        await persist({ ...settings, google: { connected: false, email: null, lastSyncedAt: null } });
+        await persist({
+          ...settings,
+          google: { connected: false, email: null, lastSyncedAt: null },
+          billing: { status: "unknown", expiresAt: null, lastCheckedAt: null },
+        });
       },
       true
     );
@@ -866,7 +882,7 @@ export default function SettingsScreen() {
           <>
             {!hasPaidAccess(settings.billing) ? (
               <Text style={styles.errorHelper}>
-                VOICEVOXは有料プランの方のみご利用いただけます。下の「利用プラン」から加入するか、管理者コードを入力してください(有効になるまでは端末内蔵ボイスで読み上げられます)。
+                VOICEVOXは有料プランの方のみご利用いただけます。下の「利用プラン」から加入してください(有効になるまでは端末内蔵ボイスで読み上げられます)。
               </Text>
             ) : null}
             <Text style={styles.smallHelper}>
@@ -942,7 +958,7 @@ export default function SettingsScreen() {
           <>
             {!hasPaidAccess(settings.billing) ? (
               <Text style={styles.errorHelper}>
-                内蔵VOICEVOXは有料プランの方のみご利用いただけます。下の「利用プラン」から加入するか、管理者コードを入力してください(有効になるまでは端末内蔵ボイスで読み上げられます)。
+                内蔵VOICEVOXは有料プランの方のみご利用いただけます。下の「利用プラン」から加入してください(有効になるまでは端末内蔵ボイスで読み上げられます)。
               </Text>
             ) : null}
             <Text style={styles.smallHelper}>
@@ -1065,7 +1081,10 @@ export default function SettingsScreen() {
 
       <Section title="利用プラン">
         <Text style={styles.helper}>
-          「備え付けのAI」(共有プロキシ経由の対話AI)とVOICEVOX(サーバー方式・内蔵方式どちらも)は、有料プランへの加入、または管理者コードの入力が必要な機能です。「自分のAPIキーを使う」モードと端末/ブラウザ内蔵ボイスは、プラン状態に関わらず無料でお使いいただけます。
+          「備え付けのAI」(共有プロキシ経由の対話AI)とVOICEVOX(サーバー方式・内蔵方式どちらも)は、有料プランへの加入が必要な機能です。「自分のAPIキーを使う」モードと端末/ブラウザ内蔵ボイスは、プラン状態に関わらず無料でお使いいただけます。
+        </Text>
+        <Text style={styles.smallHelper}>
+          加入状況の確認には、下の「Googleアカウント連携」でのログインが必要です(このGoogleアカウントのメールアドレス単位で、有料プラン・管理者を判定します)。
         </Text>
 
         <View style={styles.planBadge}>
@@ -1085,40 +1104,36 @@ export default function SettingsScreen() {
           <Text style={styles.errorHelper}>
             決済ページが未設定です(アプリ配布者による設定待ちです)。設定が完了するまでは有料機能はご利用いただけません。
           </Text>
-        ) : null}
-
-        <Text style={styles.label}>あなたのコード</Text>
-        <TextInput
-          style={styles.input}
-          value={licenseCodeDraft}
-          onChangeText={onChangeLicenseCode}
-          onBlur={onBlurLicenseCode}
-          autoCapitalize="characters"
-          placeholder="例: KTLK-AB12-CD34"
-        />
-        <Text style={styles.smallHelper}>
-          購入時にこのコードで加入状況を識別します。管理者の方は、この欄に管理者コードを直接入力して「状態を確認」を押してください。
-        </Text>
+        ) : !settings.google.connected ? (
+          <Text style={styles.errorHelper}>
+            まだGoogleアカウントと連携していません。下の「Googleアカウント連携」セクションからログインしてから、こちらの「状態を確認」・「加入ページを開く」をお使いください。
+          </Text>
+        ) : (
+          <Text style={styles.okHelper}>✓ {settings.google.email ?? "Googleアカウント"} で判定します</Text>
+        )}
 
         <View style={styles.chipWrap}>
-          <Pressable style={styles.primaryButton} onPress={handleOpenSubscribePage}>
+          <Pressable
+            style={[styles.primaryButton, !settings.google.connected && styles.primaryButtonDisabled]}
+            onPress={handleOpenSubscribePage}
+            disabled={!settings.google.connected}
+          >
             <Text style={styles.primaryButtonText}>💳 加入ページを開く</Text>
           </Pressable>
         </View>
         <Pressable
-          style={[styles.secondaryButton, billingChecking && styles.primaryButtonDisabled]}
+          style={[
+            styles.secondaryButton,
+            (billingChecking || !settings.google.connected) && styles.primaryButtonDisabled,
+          ]}
           onPress={handleCheckBillingStatus}
-          disabled={billingChecking}
+          disabled={billingChecking || !settings.google.connected}
         >
           {billingChecking ? (
             <ActivityIndicator size="small" color="#2F5BD9" />
           ) : (
             <Text style={styles.secondaryButtonText}>🔄 状態を確認</Text>
           )}
-        </Pressable>
-
-        <Pressable onPress={handleRegenerateLicenseCode}>
-          <Text style={styles.linkText}>新しいコードを発行する</Text>
         </Pressable>
       </Section>
 
@@ -1165,7 +1180,7 @@ export default function SettingsScreen() {
           </>
         ) : !isThemeSubscriber ? (
           <Text style={styles.errorHelper}>
-            カラーテーマの変更は有料プランの方のみご利用いただけます。上の「利用プラン」から加入するか、管理者コードを入力してください(未加入の間は標準の配色になります)。
+            カラーテーマの変更は有料プランの方のみご利用いただけます。上の「利用プラン」から加入してください(未加入の間は標準の配色になります)。
           </Text>
         ) : (
           <Text style={styles.smallHelper}>お好みの配色をプリセットから選べます。</Text>
@@ -1235,7 +1250,7 @@ export default function SettingsScreen() {
               </Text>
             ) : !hasPaidAccess(settings.billing) ? (
               <Text style={styles.errorHelper}>
-                備え付けのAIは有料プランの方のみご利用いただけます。上の「利用プラン」から加入するか、管理者コードを入力してください。
+                備え付けのAIは有料プランの方のみご利用いただけます。上の「利用プラン」から加入してください。
               </Text>
             ) : null}
 
@@ -1353,7 +1368,7 @@ export default function SettingsScreen() {
 
       <Section title="Googleアカウント連携(履歴・AIの記憶を引き継ぐ)">
         <Text style={styles.smallHelper}>
-          Googleアカウントでログインすると、会話ログとAIが要約した記憶(呼び方や最近の話題など)を、そのアカウント自身のGoogleドライブ(このアプリ専用の非公開領域=通常のドライブ画面には表示されません)に保存します。別の端末で同じGoogleアカウントにログインすると、そこから会話を続けられます。開発者のサーバーには一切送信・保存されません。
+          Googleアカウントでログインすると、会話ログとAIが要約した記憶(呼び方や最近の話題など)を、そのアカウント自身のGoogleドライブ(このアプリ専用の非公開領域=通常のドライブ画面には表示されません)に保存します。別の端末で同じGoogleアカウントにログインすると、そこから会話を続けられます。開発者のサーバーには一切送信・保存されません。有料プラン(上の「利用プラン」)の加入状況も、このGoogleアカウントのメールアドレス単位で判定されるため、有料機能を使うにはここでの連携が必須です。
         </Text>
 
         {!isGoogleSyncConfigured() ? (
