@@ -27,7 +27,60 @@ jobs:
           java-version: "17"
 
       - name: Install dependencies
-        run: npm ci --legacy-peer-deps
+        run: npm ci --legacy-peer-deps --omit=optional
+
+      - name: Download VOICEVOX CORE native libraries (on-device synthesis, Android限定)
+        # 「VOICEVOXをアプリに内蔵する」機能(modules/voicevox-local/)で使う
+        # voicevox_core本体(C API)・ONNX Runtime・OpenJTalk辞書を、VOICEVOX CORE公式の
+        # Downloaderツールで取得し、jniLibs/assetsとして配置する。
+        # 個々のVVM音声モデル(声そのもの)はここでは取得しない。有料プラン/管理者が
+        # アプリの設定画面から個別にダウンロードする方式のため(README「6.」参照)。
+        env:
+          # GitHubのレートリミット回避用。Actions実行時に自動で払い出されるトークンを使う。
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -eu
+          mkdir -p voicevox_dl
+          curl -sSfL \
+            https://github.com/VOICEVOX/voicevox_core/releases/latest/download/download-linux-x64 \
+            -o voicevox_dl/download
+          chmod +x voicevox_dl/download
+
+          voicevox_dl/download \
+            --os android --cpu-arch arm64 \
+            --exclude additional-libraries --exclude models \
+            --output voicevox_dl/out
+
+          JNI_DIR="modules/voicevox-local/android/src/main/jniLibs/arm64-v8a"
+          ASSET_DICT_DIR="modules/voicevox-local/android/src/main/assets/voicevox_dict"
+          mkdir -p "$JNI_DIR" "$ASSET_DICT_DIR"
+
+          CORE_SO="$(find voicevox_dl/out/c_api -name 'libvoicevox_core.so' | head -n1)"
+          if [ -z "$CORE_SO" ]; then
+            echo "::error::libvoicevox_core.so が見つかりませんでした(voicevox_core配布物の構成が変わった可能性があります)"
+            exit 1
+          fi
+          cp "$CORE_SO" "$JNI_DIR/libvoicevox_core.so"
+
+          ORT_SO="$(find voicevox_dl/out/onnxruntime -name '*.so*' | head -n1)"
+          if [ -z "$ORT_SO" ]; then
+            echo "::error::ONNX Runtimeの共有ライブラリが見つかりませんでした"
+            exit 1
+          fi
+          # モジュール側は固定ファイル名(libvoicevox_onnxruntime.so)を前提にしているため、
+          # ダウンロードされた実際のファイル名に関わらずリネームしてコピーする。
+          cp "$ORT_SO" "$JNI_DIR/libvoicevox_onnxruntime.so"
+
+          DICT_SUBDIR="$(find voicevox_dl/out/dict -mindepth 1 -maxdepth 1 -type d | head -n1)"
+          if [ -z "$DICT_SUBDIR" ]; then
+            echo "::error::OpenJTalk辞書ディレクトリが見つかりませんでした"
+            exit 1
+          fi
+          cp -r "$DICT_SUBDIR"/. "$ASSET_DICT_DIR"/
+
+          echo "配置結果:"
+          ls -la "$JNI_DIR"
+          ls "$ASSET_DICT_DIR" | head
 
       - name: Generate native Android project (expo prebuild)
         run: npx expo prebuild --platform android --no-install
@@ -45,6 +98,6 @@ jobs:
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: kokoro-talk-apk
+          name: empa-apk
           path: android/app/build/outputs/apk/release/*.apk
           retention-days: 14
