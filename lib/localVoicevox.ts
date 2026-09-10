@@ -15,11 +15,23 @@ import VoicevoxLocalModule from "../modules/voicevox-local/src/VoicevoxLocalModu
  *   (.github/workflows/build-apk.yml、modules/voicevox-local/参照)。
  * - VVMファイル(声そのもののデータ)だけを、利用者が選んだ話者ごとに個別に
  *   ダウンロードする。ダウンロード元は VOICEVOX/voicevox_vvm リポジトリの
- *   raw配信(MITではなくVOICEVOX音声モデル利用規約が適用されるが、アプリへの
- *   組み込み・再配布は許諾されている。詳細はREADME参照)。
+ *   GitHub Releases(MITではなくVOICEVOX音声モデル利用規約が適用されるが、
+ *   アプリへの組み込み・再配布は許諾されている。詳細はREADME参照)。
+ *   (以前は `raw.githubusercontent.com/.../main/vvms/` を直接叩いていたが、
+ *   このリポジトリはVVMファイルをリポジトリ内には置いておらず、GitHub
+ *   Releasesの添付ファイルとしてのみ配布している。そのためこのパスは常に
+ *   404になり、「ダウンロードしてもエラーで使用できない」不具合の原因に
+ *   なっていた。`releases/latest/download/` はGitHubが提供する、常に最新
+ *   リリースの添付ファイルへリダイレクトしてくれるURLのエイリアス。)
  */
 
-const VVM_DOWNLOAD_BASE_URL = "https://raw.githubusercontent.com/VOICEVOX/voicevox_vvm/main/vvms/";
+const VVM_DOWNLOAD_BASE_URL = "https://github.com/VOICEVOX/voicevox_vvm/releases/latest/download/";
+
+/** 正常にダウンロードされたVVMファイルとして扱える最小サイズ(バイト)。
+ * 実際のVVMファイルは数十MB単位だが、ここでは「エラーページ等の小さな
+ * ファイルが誤ってVVMとして保存されてしまう」ことだけを検出できれば十分
+ * なので、余裕を持たせつつ十分小さい閾値にしている。 */
+const MIN_VALID_VVM_BYTES = 1024 * 1024; // 1MB
 
 export function isLocalVoicevoxSupported(): boolean {
   return Platform.OS === "android";
@@ -87,9 +99,33 @@ export async function downloadVvm(
       onProgress?.(totalBytes > 0 ? bytesWritten / totalBytes : null);
     },
   });
-  const result = await task.downloadAsync();
+
+  let result: File | null;
+  try {
+    result = await task.downloadAsync();
+  } catch (e) {
+    // 途中で失敗した場合、壊れた/中途半端なファイルが残って「ダウンロード
+    // 済み」と誤判定されないよう削除しておく
+    vvmFile(vvmFileName).delete();
+    throw new Error(
+      "ダウンロードに失敗しました。電波状況を確認して再度お試しください。" +
+        (e instanceof Error ? `(${e.message})` : "")
+    );
+  }
   if (!result) {
     throw new Error("ダウンロードが完了しませんでした。電波状況を確認して再度お試しください。");
+  }
+
+  // expo-file-systemはHTTPのステータスコードに関わらずレスポンス本体を
+  // そのまま書き込むため、404等のエラーページが「ダウンロード成功」と
+  // なってしまうことがある(実際にダウンロード元URLの誤りでこの状態が
+  // 発生していた)。本物のVVMファイルは数十MBあるため、明らかに小さい
+  // 場合はエラーとして扱い、壊れたファイルを残さないよう削除する。
+  if (result.size < MIN_VALID_VVM_BYTES) {
+    result.delete();
+    throw new Error(
+      "ダウンロードしたデータが不正でした(サーバー側の一時的な問題の可能性があります)。時間をおいて再度お試しください。"
+    );
   }
 }
 

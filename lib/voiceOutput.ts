@@ -38,6 +38,18 @@ import { VoiceOption, VoiceSettings } from "./types";
  *      replace()で音源だけ差し替える。ネイティブ(スマホ)ではプレイヤーの
  *      生成・破棄のたびにOS側のオーディオセッション初期化コストがかかり、
  *      これが文の切れ目ごとの体感の「間」として効いていたため。
+ *   3. 文の区切りを句点(。！？)だけでなく、長くなりすぎた場合は読点(、)でも
+ *      区切るようにした(extractSpeakableChunks)。AIの最初の一文が長いと、
+ *      句点が来るまで一切読み上げが始まらず「タイムラグが大きい」と
+ *      感じられるため、最初の音声が出るまでの体感時間を短縮する。
+ *   4. クラウド合成(VOICEVOX/Google)が一定時間(CLOUD_SYNTHESIS_TIMEOUT_MS)
+ *      以内に終わらない場合は、「音声が出ない」体感を避けるため、その文だけ
+ *      端末内蔵ボイスへ自動フォールバックして即座に読み上げる
+ *      (よくあるのは、自前ホスティングしたVOICEVOXサーバーが無料枠の
+ *      スリープから起きる際の初回リクエストの遅延)。あわせて、
+ *      チャット画面を開いた時点でVOICEVOXサーバーへ軽いリクエストを1回
+ *      投げて事前に起こしておく仕組み(warmUpVoicevoxServer)も用意している
+ *      (呼び出し側はapp/index.tsx)。
  */
 
 function isWeb() {
@@ -89,6 +101,22 @@ function listWebVoices(): Promise<VoiceOption[]> {
       synth.onvoiceschanged = collect;
       setTimeout(collect, 500);
     }
+  });
+}
+
+/**
+ * VOICEVOXサーバーへの初回リクエストが「無料枠ホスティングのスリープからの
+ * 起床」で数十秒かかることがある(Renderの無料プラン等でよくある制約)。
+ * チャット画面を開いたタイミングなど、実際に読み上げが必要になる前に
+ * 軽いリクエストを1回投げておくことで、可能な範囲で事前に起こしておく。
+ * 失敗しても何もしない(実際の読み上げ時は通常のエラー処理・
+ * 端末内蔵ボイスへのフォールバックに任せればよいため)。
+ */
+export function warmUpVoicevoxServer(baseUrl: string): void {
+  const base = baseUrl.trim().replace(/\/+$/, "");
+  if (!base) return;
+  fetch(`${base}/version`).catch(() => {
+    // 起こすためだけのfire-and-forgetリクエストなので、失敗は無視してよい
   });
 }
 
@@ -182,12 +210,25 @@ export function speakText(
 
 function dispatchSpeak(text: string, voice: VoiceSettings, callbacks: SpeakCallbacks) {
   if (needsAsyncSynthesis(voice)) {
-    synthesizeAsyncAudio(text, voice)
-      .then((audio) => playAudioArrayBuffer(audio.arrayBuffer, audio.mimeType, audio.fileExt, callbacks))
-      .catch((e) => {
-        console.warn("読み上げに失敗しました", e);
+    // stopSpeaking()で打ち切られていないかを後から判定できるよう、開始時点の世代を覚えておく
+    const generation = queueGeneration;
+    const synthesis = synthesizeAsyncAudio(text, voice).catch((e) => {
+      console.warn("読み上げに失敗しました", e);
+      return null;
+    });
+    raceWithTimeout(synthesis, CLOUD_SYNTHESIS_TIMEOUT_MS).then((result) => {
+      if (generation !== queueGeneration) return; // 待っている間にstopSpeaking()で打ち切られた
+      if (result === TIMED_OUT) {
+        // 「音声が出ない」体感を避けるため、遅い合成を待たずに端末内蔵ボイスで即座に読み上げる
+        speakWithSystemVoice(text, voice.selectedVoiceId, voice.rate, voice.pitch, callbacks);
+        return;
+      }
+      if (!result) {
         callbacks.onError?.();
-      });
+        return;
+      }
+      playAudioArrayBuffer(result.arrayBuffer, result.mimeType, result.fileExt, callbacks);
+    });
     return;
   }
 
@@ -198,6 +239,27 @@ interface SynthesizedAudio {
   arrayBuffer: ArrayBuffer;
   mimeType: string;
   fileExt: string;
+}
+
+/**
+ * クラウド合成(VOICEVOXサーバー/Google Cloud TTS)がこの時間以内に終わらない場合、
+ * 「音声が出ない・タイムラグが大きすぎる」体感を避けるため、その文だけ端末内蔵
+ * ボイスへフォールバックする。自前ホスティングのVOICEVOXサーバーが無料枠の
+ * スリープから起きる場合などを想定した値(通常の応答はこれよりずっと速い)。
+ */
+const CLOUD_SYNTHESIS_TIMEOUT_MS = 4000;
+
+const TIMED_OUT = Symbol("timed-out");
+
+/** `promise` が `ms` ミリ秒以内に解決しなければ TIMED_OUT を返す(promise自体は打ち切らない)。 */
+function raceWithTimeout<T>(promise: Promise<T>, ms: number): Promise<T | typeof TIMED_OUT> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => resolve(TIMED_OUT), ms);
+    promise.then((value) => {
+      clearTimeout(timer);
+      resolve(value);
+    });
+  });
 }
 
 interface QueueItem {
@@ -262,9 +324,24 @@ async function processSpeechQueue(generation: number): Promise<void> {
   isProcessingQueue = true;
 
   if (item.synthesis) {
-    const audio = await item.synthesis;
+    const audio = await raceWithTimeout(item.synthesis, CLOUD_SYNTHESIS_TIMEOUT_MS);
     if (generation !== queueGeneration) return; // 待っている間にstopSpeaking()で打ち切られた
-    if (!audio) {
+    if (audio === TIMED_OUT) {
+      // 「音声が出ない」体感を避けるため、遅い合成を待たずに端末内蔵ボイスで即座に読み上げる
+      // (先読みリクエスト自体はそのまま裏で進めておき、結果は使わずに捨てる)
+      await new Promise<void>((resolve) => {
+        speakWithSystemVoice(item.text, item.voice.selectedVoiceId, item.voice.rate, item.voice.pitch, {
+          onDone: () => {
+            item.callbacks.onDone?.();
+            resolve();
+          },
+          onError: () => {
+            item.callbacks.onError?.();
+            resolve();
+          },
+        });
+      });
+    } else if (!audio) {
       item.callbacks.onError?.();
     } else {
       await playAudioArrayBuffer(audio.arrayBuffer, audio.mimeType, audio.fileExt, item.callbacks);
@@ -296,6 +373,13 @@ async function processSpeechQueue(generation: number): Promise<void> {
  * 句点(。！？)や改行までを1文として扱い、末尾の未確定な文(区切りがまだ来ていない部分)は
  * 次回以降に持ち越す。呼び出し側は返ってきた `consumedUpTo` を次回の `consumedLength` に渡すこと。
  */
+/**
+ * 読点(、)を早期区切りとして使い始める最小の節の長さ。これより短い節では
+ * 読点を無視し、通常通り句点(。！？)や改行まで待つ(短すぎる区切りで発話が
+ * 不自然にブツ切れになるのを防ぐため)。
+ */
+const EARLY_BOUNDARY_MIN_LENGTH = 20;
+
 export function extractSpeakableChunks(
   fullText: string,
   consumedLength: number
@@ -303,10 +387,17 @@ export function extractSpeakableChunks(
   const unconsumed = fullText.slice(consumedLength);
   const chunks: string[] = [];
   let lastBoundary = 0;
-  const boundaryRegex = /[。！？\n]/g;
+  // 文末(。！？改行)に加えて読点(、)も区切り候補にする。AIの最初の一文が
+  // 長いと句点が来るまで一切読み上げが始まらず「タイムラグが大きい」と
+  // 感じられるため、節が一定の長さ(EARLY_BOUNDARY_MIN_LENGTH)を超えた場合は
+  // 読点でも区切って、最初の音声が出るまでの体感時間を短縮する。
+  const boundaryRegex = /[。！？\n、]/g;
   let match: RegExpExecArray | null;
   while ((match = boundaryRegex.exec(unconsumed))) {
     const end = match.index + 1;
+    if (match[0] === "、" && end - lastBoundary < EARLY_BOUNDARY_MIN_LENGTH) {
+      continue;
+    }
     const chunk = unconsumed.slice(lastBoundary, end).trim();
     if (chunk) chunks.push(chunk);
     lastBoundary = end;
