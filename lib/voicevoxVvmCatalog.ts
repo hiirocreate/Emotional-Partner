@@ -15,6 +15,11 @@ export interface LocalVoicevoxVvmEntry {
   styles: LocalVoicevoxStyleEntry[];
 }
 
+export interface LocalVoicevoxSpeakerGroup {
+  speakerName: string;
+  styles: Array<{ vvmFile: string; styleId: number; styleName: string }>;
+}
+
 export const LOCAL_VOICEVOX_CATALOG: LocalVoicevoxVvmEntry[] = [
   {
     vvmFile: "0.vvm",
@@ -269,3 +274,30 @@ export const LOCAL_VOICEVOX_CATALOG: LocalVoicevoxVvmEntry[] = [
     ],
   },
 ];
+
+/**
+ * LOCAL_VOICEVOX_CATALOG は「VVMファイル単位」の一覧だが、設定画面では
+ * 「話者(キャラクター)単位」でまとめて折りたたみ表示したい(130種類前後の
+ * スタイルを一枚のフラットな一覧にすると、スクロールが非常に長くなってしまうため)。
+ * 同じ話者が複数のVVMファイルにまたがって登場する(例: 猫使アルは13.vvmと
+ * 21.vvmの両方にスタイルを持つ)ため、話者名をキーにVVMファイルをまたいで
+ * 集約する。
+ */
+export const LOCAL_VOICEVOX_SPEAKER_GROUPS: LocalVoicevoxSpeakerGroup[] = (() => {
+  const map = new Map<string, LocalVoicevoxSpeakerGroup>();
+  for (const entry of LOCAL_VOICEVOX_CATALOG) {
+    for (const style of entry.styles) {
+      let group = map.get(style.speakerName);
+      if (!group) {
+        group = { speakerName: style.speakerName, styles: [] };
+        map.set(style.speakerName, group);
+      }
+      group.styles.push({
+        vvmFile: entry.vvmFile,
+        styleId: style.styleId,
+        styleName: style.styleName,
+      });
+    }
+  }
+  return [...map.values()];
+})();
