@@ -24,7 +24,13 @@ import { pullFromDriveIfNewer, pushToDriveInBackground } from "../lib/sync";
 import { resolveThemeColors } from "../lib/theme";
 import { AppSettings, ChatMessage } from "../lib/types";
 import { useVoiceInput } from "../lib/voiceInput";
-import { enqueueSpeech, extractSpeakableChunks, speakText, stopSpeaking } from "../lib/voiceOutput";
+import {
+  enqueueSpeech,
+  extractSpeakableChunks,
+  speakText,
+  stopSpeaking,
+  warmUpVoicevoxServer,
+} from "../lib/voiceOutput";
 
 /** VOICEVOXの利用にはサブスク(または管理者)が必要なため、権利がない場合は端末内蔵ボイスへ自動フォールバックする */
 function resolveVoiceSettings(settings: AppSettings) {
@@ -42,8 +48,25 @@ function speakWithGate(text: string, settings: AppSettings, callbacks?: Paramete
  * AIの返答をストリーミングに合わせて逐次読み上げるための、キュー追加版のspeakWithGate。
  * 全文が揃うのを待たずに、文が確定するたびに読み上げを開始できるので体感速度が上がる。
  */
-function enqueueWithGate(text: string, settings: AppSettings) {
-  enqueueSpeech(text, resolveVoiceSettings(settings));
+function enqueueWithGate(
+  text: string,
+  settings: AppSettings,
+  callbacks?: Parameters<typeof enqueueSpeech>[2]
+) {
+  enqueueSpeech(text, resolveVoiceSettings(settings), callbacks);
+}
+
+/**
+ * VOICEVOXサーバー(自前ホスティング/共有サーバーいずれも)が無料枠ホスティングの
+ * スリープから起きるまでの初回遅延を減らすため、実際に読み上げが必要になる前に
+ * 軽いリクエストを投げて事前に起こしておく。読み上げに端末内蔵ボイスしか
+ * 使わない設定の場合は何もしない。
+ */
+function warmUpVoiceIfNeeded(settings: AppSettings) {
+  const voice = resolveVoiceSettings(settings);
+  if (voice.provider === "voicevox" && voice.voicevox.baseUrl) {
+    warmUpVoicevoxServer(voice.voicevox.baseUrl);
+  }
 }
 
 const APP_DISCLAIMER =
@@ -67,6 +90,16 @@ export default function ChatScreen() {
   // Googleアカウント連携が有効な場合、直近このくらいメッセージが積み重なったら
   // AIの記憶(要約)を更新する。アプリ起動中だけ数えればよいので単純なrefでよい。
   const messagesSinceMemoryUpdateRef = useRef(0);
+  // 1つの返答の読み上げ中に音声エラーが何度も起きても、バナー表示は1回に留める
+  // (文ごとにエラーが出るとバナーが何度も出たり消えたりしてうるさいため)。
+  const voiceErrorShownRef = useRef(false);
+  const handleVoiceError = useCallback(() => {
+    if (voiceErrorShownRef.current) return;
+    voiceErrorShownRef.current = true;
+    setErrorBanner((prev) =>
+      prev ?? "音声の再生に失敗しました。設定画面の「読み上げ音声」設定をご確認ください。"
+    );
+  }, []);
 
   useEffect(() => {
     (async () => {
@@ -76,6 +109,7 @@ export default function ChatScreen() {
       const pulled = await pullFromDriveIfNewer(s, h);
       setSettings(pulled.settings);
       setMessages(pulled.messages);
+      warmUpVoiceIfNeeded(pulled.settings);
     })();
     return () => {
       activeStreamRef.current?.abort();
@@ -88,7 +122,12 @@ export default function ChatScreen() {
   // 画面にフォーカスが戻るたびに設定を読み直すことで同期させる。
   useFocusEffect(
     useCallback(() => {
-      loadSettings().then(setSettings);
+      loadSettings().then((s) => {
+        setSettings(s);
+        // 設定画面から戻ってきた/しばらくぶりにこの画面に戻ってきたタイミングでも、
+        // VOICEVOXサーバーがスリープしている可能性があるため改めて起こしておく。
+        warmUpVoiceIfNeeded(s);
+      });
     }, [])
   );
 
@@ -101,6 +140,7 @@ export default function ChatScreen() {
     async (text: string, inputMode: "text" | "voice") => {
       if (!text.trim() || !settings) return;
       setErrorBanner(null);
+      voiceErrorShownRef.current = false;
       // 前回の返答の読み上げが続いていた場合、新しい相談を送ったタイミングで打ち切る
       stopSpeaking();
 
@@ -138,7 +178,7 @@ export default function ChatScreen() {
           if (shouldSpeak) {
             const { chunks, consumedUpTo } = extractSpeakableChunks(partial, spokenUpTo);
             for (const chunk of chunks) {
-              enqueueWithGate(chunk, settings);
+              enqueueWithGate(chunk, settings, { onError: handleVoiceError });
             }
             spokenUpTo = consumedUpTo;
           }
@@ -192,7 +232,7 @@ export default function ChatScreen() {
           // 句読点が付かないまま終わった末尾の断片(最後の一文など)を読み上げる
           const tail = reply.slice(spokenUpTo).trim();
           if (tail) {
-            enqueueWithGate(tail, settings);
+            enqueueWithGate(tail, settings, { onError: handleVoiceError });
           }
         }
       } catch (e) {
@@ -207,7 +247,7 @@ export default function ChatScreen() {
         activeStreamRef.current = null;
       }
     },
-    [messages, settings, persistMessages]
+    [messages, settings, persistMessages, handleVoiceError]
   );
 
   const voice = useVoiceInput((finalText) => {
@@ -285,7 +325,13 @@ export default function ChatScreen() {
             accentColor={theme.buttonColor}
             onSpeak={
               item.role === "assistant" && item.id !== "__streaming__"
-                ? (t) => speakWithGate(t, settings)
+                ? (t) =>
+                    speakWithGate(t, settings, {
+                      onError: () =>
+                        setErrorBanner(
+                          "音声の再生に失敗しました。設定画面の「読み上げ音声」設定をご確認ください。"
+                        ),
+                    })
                 : undefined
             }
           />
