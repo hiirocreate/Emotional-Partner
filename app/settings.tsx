@@ -225,6 +225,37 @@ export default function SettingsScreen() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // 上のuseEffectは画面マウント時に一度しか走らないため、「この設定画面に
+  // 居続けたまま」Googleアカウント連携→課金状態確認を行って初めて有料プラン
+  // (管理者含む)が有効になったケースでは、共有VOICEVOXサーバーへの自動接続が
+  // 反映されない(=「VOICEVOXのURLが自動入力されない」)。billing.statusが
+  // 変化するたびに同じ条件を再チェックすることでこれを解消する。
+  useEffect(() => {
+    if (!settings) return;
+    if (
+      !settings.voice.voicevox.baseUrl &&
+      hasPaidAccess(settings.billing) &&
+      isSharedVoicevoxConfigured()
+    ) {
+      const next: AppSettings = {
+        ...settings,
+        voice: {
+          ...settings.voice,
+          voicevox: { ...settings.voice.voicevox, baseUrl: SHARED_VOICEVOX_URL },
+        },
+      };
+      setVoicevoxUrlDraft(SHARED_VOICEVOX_URL);
+      persist(next);
+      const cached = getCachedVoicevoxVoices(SHARED_VOICEVOX_URL);
+      if (cached) {
+        setVoicevoxSpeakers(cached);
+      } else {
+        fetchVoicevoxSpeakers(SHARED_VOICEVOX_URL, false);
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [settings?.billing.status]);
+
   if (!settings) return null;
 
   const update = (updater: (draft: AppSettings) => AppSettings) => {
