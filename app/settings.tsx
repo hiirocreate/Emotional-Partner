@@ -24,7 +24,7 @@ import {
   isVvmDownloaded,
   listDownloadedVvmFiles,
 } from "../lib/localVoicevox";
-import { LOCAL_VOICEVOX_CATALOG } from "../lib/voicevoxVvmCatalog";
+import { LOCAL_VOICEVOX_CATALOG, LOCAL_VOICEVOX_SPEAKER_GROUPS } from "../lib/voicevoxVvmCatalog";
 import {
   isBillingConfigured,
   isGoogleSyncConfigured,
@@ -170,6 +170,15 @@ export default function SettingsScreen() {
   const [customColorDraft, setCustomColorDraft] = useState<CustomThemeColors>({
     ...DEFAULT_THEME_COLORS,
   });
+  // 音声選択のスクロールが長すぎる問題への対策: system/voicevox/googleの
+  // フラットな一覧は検索絞り込み+初期表示件数の制限で、内蔵VOICEVOXの
+  // 話者一覧は話者単位の折りたたみ+検索絞り込みで、それぞれスクロール量を抑える。
+  const [voiceFilterText, setVoiceFilterText] = useState("");
+  const [showAllVoices, setShowAllVoices] = useState(false);
+  const [localVoicevoxFilterText, setLocalVoicevoxFilterText] = useState("");
+  const [expandedLocalVoicevoxSpeakers, setExpandedLocalVoicevoxSpeakers] = useState<Set<string>>(
+    new Set()
+  );
 
   useEffect(() => {
     (async () => {
@@ -246,7 +255,23 @@ export default function SettingsScreen() {
       );
       return;
     }
+    // 音源を切り替えたら、前の音源で絞り込んでいた検索文字列は引き継がない
+    setVoiceFilterText("");
+    setShowAllVoices(false);
+    setLocalVoicevoxFilterText("");
     persist({ ...settings, voice: { ...settings.voice, provider } });
+  };
+
+  const toggleLocalVoicevoxSpeakerExpanded = (speakerName: string) => {
+    setExpandedLocalVoicevoxSpeakers((prev) => {
+      const next = new Set(prev);
+      if (next.has(speakerName)) {
+        next.delete(speakerName);
+      } else {
+        next.add(speakerName);
+      }
+      return next;
+    });
   };
 
   const handleSelectLocalVoicevoxStyle = async (vvmFileName: string, styleId: number) => {
@@ -975,27 +1000,81 @@ export default function SettingsScreen() {
             ) : null}
 
             <Text style={styles.label}>声を選ぶ（タップで選択、未ダウンロードなら自動取得）</Text>
-            <View style={styles.chipWrap}>
-              {LOCAL_VOICEVOX_CATALOG.flatMap((entry) =>
-                entry.styles.map((style) => {
-                  const selected = settings.voice.localVoicevox.selectedStyleId === style.styleId;
-                  const downloaded = downloadedVvmFiles.includes(entry.vvmFile);
-                  return (
+            <Text style={styles.smallHelper}>
+              話者(キャラクター)ごとにまとめています。名前をタップすると、その話者のスタイル一覧が開きます。
+            </Text>
+            <TextInput
+              style={styles.input}
+              value={localVoicevoxFilterText}
+              onChangeText={setLocalVoicevoxFilterText}
+              placeholder="話者名・スタイル名で検索（例: ずんだもん）"
+            />
+            {(() => {
+              const filterLower = localVoicevoxFilterText.trim().toLowerCase();
+              const filteredGroups = filterLower
+                ? LOCAL_VOICEVOX_SPEAKER_GROUPS.filter(
+                    (g) =>
+                      g.speakerName.toLowerCase().includes(filterLower) ||
+                      g.styles.some((s) => s.styleName.toLowerCase().includes(filterLower))
+                  )
+                : LOCAL_VOICEVOX_SPEAKER_GROUPS;
+              if (filteredGroups.length === 0) {
+                return (
+                  <Text style={styles.smallHelper}>「{localVoicevoxFilterText}」に一致する話者が見つかりませんでした。</Text>
+                );
+              }
+              return filteredGroups.map((group) => {
+                // 検索で絞り込んでいる間は、探している話者をすぐ見られるよう自動的に展開する
+                const isExpanded = filterLower.length > 0 || expandedLocalVoicevoxSpeakers.has(group.speakerName);
+                const downloadedCount = group.styles.filter((s) =>
+                  downloadedVvmFiles.includes(s.vvmFile)
+                ).length;
+                const hasSelected = group.styles.some(
+                  (s) => s.styleId === settings.voice.localVoicevox.selectedStyleId
+                );
+                return (
+                  <View key={group.speakerName} style={styles.speakerGroup}>
                     <Pressable
-                      key={style.styleId}
-                      onPress={() => handleSelectLocalVoicevoxStyle(entry.vvmFile, style.styleId)}
-                      disabled={downloadingVvmFile != null}
-                      style={[styles.chip, selected && styles.chipActive]}
+                      onPress={() => toggleLocalVoicevoxSpeakerExpanded(group.speakerName)}
+                      style={[styles.speakerHeader, hasSelected && styles.speakerHeaderActive]}
                     >
-                      <Text style={[styles.chipText, selected && styles.chipTextActive]}>
-                        {downloaded ? "✓ " : "⬇ "}
-                        {style.speakerName}（{style.styleName}）
+                      <Text
+                        style={[styles.speakerHeaderText, hasSelected && styles.speakerHeaderTextActive]}
+                      >
+                        {isExpanded ? "▾" : "▸"} {group.speakerName}
+                        {downloadedCount > 0
+                          ? `　DL済み ${downloadedCount}/${group.styles.length}`
+                          : `　${group.styles.length}種類`}
                       </Text>
                     </Pressable>
-                  );
-                })
-              )}
-            </View>
+                    {isExpanded ? (
+                      <View style={styles.chipWrap}>
+                        {group.styles.map((style) => {
+                          const selected =
+                            settings.voice.localVoicevox.selectedStyleId === style.styleId;
+                          const downloaded = downloadedVvmFiles.includes(style.vvmFile);
+                          return (
+                            <Pressable
+                              key={style.styleId}
+                              onPress={() =>
+                                handleSelectLocalVoicevoxStyle(style.vvmFile, style.styleId)
+                              }
+                              disabled={downloadingVvmFile != null}
+                              style={[styles.chip, selected && styles.chipActive]}
+                            >
+                              <Text style={[styles.chipText, selected && styles.chipTextActive]}>
+                                {downloaded ? "✓ " : "⬇ "}
+                                {style.styleName}
+                              </Text>
+                            </Pressable>
+                          );
+                        })}
+                      </View>
+                    ) : null}
+                  </View>
+                );
+              });
+            })()}
 
             {downloadedVvmFiles.length > 0 ? (
               <>
@@ -1034,27 +1113,65 @@ export default function SettingsScreen() {
                   : "利用可能な音声を検出できませんでした。端末/ブラウザの音声合成設定をご確認ください。"}
               </Text>
             ) : (
-              <View style={styles.chipWrap}>
-                {activeVoiceList.map((v) => (
-                  <Pressable
-                    key={v.id}
-                    onPress={() =>
-                      settings.voice.provider === "voicevox"
-                        ? onSelectVoicevoxSpeaker(v.id)
-                        : settings.voice.provider === "google"
-                        ? onSelectGoogleVoice(v.id)
-                        : onSelectSystemVoice(v.id)
-                    }
-                    style={[styles.chip, activeSelectedId === v.id && styles.chipActive]}
-                  >
-                    <Text
-                      style={[styles.chipText, activeSelectedId === v.id && styles.chipTextActive]}
-                    >
-                      {v.label}
-                    </Text>
-                  </Pressable>
-                ))}
-              </View>
+              (() => {
+                // スクロールが長くなりすぎないよう、検索で絞り込めるようにし、
+                // 絞り込んでいない状態では表示件数をいったん制限する。
+                const VOICE_LIST_CAP = 24;
+                const filterLower = voiceFilterText.trim().toLowerCase();
+                const filtered = filterLower
+                  ? activeVoiceList.filter((v) => v.label.toLowerCase().includes(filterLower))
+                  : activeVoiceList;
+                const visible =
+                  !filterLower && !showAllVoices ? filtered.slice(0, VOICE_LIST_CAP) : filtered;
+                const hiddenCount = filtered.length - visible.length;
+                return (
+                  <>
+                    {activeVoiceList.length > VOICE_LIST_CAP ? (
+                      <TextInput
+                        style={styles.input}
+                        value={voiceFilterText}
+                        onChangeText={setVoiceFilterText}
+                        placeholder="名前で検索"
+                      />
+                    ) : null}
+                    {filtered.length === 0 ? (
+                      <Text style={styles.smallHelper}>
+                        「{voiceFilterText}」に一致する音声が見つかりませんでした。
+                      </Text>
+                    ) : (
+                      <View style={styles.chipWrap}>
+                        {visible.map((v) => (
+                          <Pressable
+                            key={v.id}
+                            onPress={() =>
+                              settings.voice.provider === "voicevox"
+                                ? onSelectVoicevoxSpeaker(v.id)
+                                : settings.voice.provider === "google"
+                                ? onSelectGoogleVoice(v.id)
+                                : onSelectSystemVoice(v.id)
+                            }
+                            style={[styles.chip, activeSelectedId === v.id && styles.chipActive]}
+                          >
+                            <Text
+                              style={[
+                                styles.chipText,
+                                activeSelectedId === v.id && styles.chipTextActive,
+                              ]}
+                            >
+                              {v.label}
+                            </Text>
+                          </Pressable>
+                        ))}
+                      </View>
+                    )}
+                    {hiddenCount > 0 ? (
+                      <Pressable onPress={() => setShowAllVoices(true)} style={{ marginTop: 8 }}>
+                        <Text style={styles.linkText}>他{hiddenCount}件をすべて表示</Text>
+                      </Pressable>
+                    ) : null}
+                  </>
+                );
+              })()
             )}
           </>
         )}
@@ -1549,6 +1666,18 @@ const styles = StyleSheet.create({
     borderRadius: 16,
     backgroundColor: "#EDEEF5",
   },
+  speakerGroup: { marginBottom: 8 },
+  speakerHeader: {
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 10,
+    backgroundColor: "#EDEEF5",
+    marginBottom: 6,
+    alignSelf: "flex-start",
+  },
+  speakerHeaderActive: { backgroundColor: "#DCE4FF" },
+  speakerHeaderText: { fontSize: 12, fontWeight: "600", color: "#4A4A60" },
+  speakerHeaderTextActive: { color: "#2F5BD9" },
   chipActive: { backgroundColor: "#4A7DFF" },
   chipText: { fontSize: 12, color: "#4A4A60" },
   chipTextActive: { color: "#fff", fontWeight: "600" },
