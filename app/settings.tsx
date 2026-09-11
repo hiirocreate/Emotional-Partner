@@ -202,6 +202,12 @@ export default function SettingsScreen() {
   const [expandedLocalVoicevoxSpeakers, setExpandedLocalVoicevoxSpeakers] = useState<Set<string>>(
     new Set()
   );
+  // 話者一覧がまだ縦に長いため、内蔵VOICEVOXは検索していない間だけ表示件数を絞る
+  // (フラットな一覧側のshowAllVoicesと同じ考え方)
+  const [showAllLocalSpeakers, setShowAllLocalSpeakers] = useState(false);
+  // 「試聴」ボタンを押してから合成が終わるまで数秒かかることがあるため、
+  // 押した瞬間から結果が出るまでローディング表示にする(押せているかわからない、への対策)
+  const [isTestingVoice, setIsTestingVoice] = useState(false);
 
   useEffect(() => {
     (async () => {
@@ -313,6 +319,7 @@ export default function SettingsScreen() {
     setVoiceFilterText("");
     setShowAllVoices(false);
     setLocalVoicevoxFilterText("");
+    setShowAllLocalSpeakers(false);
     persist({ ...settings, voice: { ...settings.voice, provider } });
   };
 
@@ -677,14 +684,18 @@ export default function SettingsScreen() {
   const onBlurCallUserAs = () => persist(settings);
 
   const testVoice = () => {
+    if (isTestingVoice) return;
     const isPaidProvider =
       settings.voice.provider === "voicevox" || settings.voice.provider === "voicevox_local";
     const voiceToUse =
       isPaidProvider && !hasPaidAccess(settings.billing)
         ? { ...settings.voice, provider: "system" as const }
         : settings.voice;
+    setIsTestingVoice(true);
     speakText("こんにちは。この声でお話しします。", voiceToUse, {
+      onDone: () => setIsTestingVoice(false),
       onError: (error) => {
+        setIsTestingVoice(false);
         const base =
           settings.voice.provider === "voicevox"
             ? "VOICEVOXエンジンへの接続、または話者選択を確認してください。"
@@ -1078,57 +1089,93 @@ export default function SettingsScreen() {
                   <Text style={styles.smallHelper}>「{localVoicevoxFilterText}」に一致する話者が見つかりませんでした。</Text>
                 );
               }
-              return filteredGroups.map((group) => {
-                // 検索で絞り込んでいる間は、探している話者をすぐ見られるよう自動的に展開する
-                const isExpanded = filterLower.length > 0 || expandedLocalVoicevoxSpeakers.has(group.speakerName);
-                const downloadedCount = group.styles.filter((s) =>
-                  downloadedVvmFiles.includes(s.vvmFile)
-                ).length;
-                const hasSelected = group.styles.some(
-                  (s) => s.styleId === settings.voice.localVoicevox.selectedStyleId
-                );
-                return (
-                  <View key={group.speakerName} style={styles.speakerGroup}>
-                    <Pressable
-                      onPress={() => toggleLocalVoicevoxSpeakerExpanded(group.speakerName)}
-                      style={[styles.speakerHeader, hasSelected && styles.speakerHeaderActive]}
-                    >
-                      <Text
-                        style={[styles.speakerHeaderText, hasSelected && styles.speakerHeaderTextActive]}
-                      >
-                        {isExpanded ? "▾" : "▸"} {group.speakerName}
-                        {downloadedCount > 0
-                          ? `　DL済み ${downloadedCount}/${group.styles.length}`
-                          : `　${group.styles.length}種類`}
-                      </Text>
-                    </Pressable>
-                    {isExpanded ? (
-                      <View style={styles.chipWrap}>
-                        {group.styles.map((style) => {
-                          const selected =
-                            settings.voice.localVoicevox.selectedStyleId === style.styleId;
-                          const downloaded = downloadedVvmFiles.includes(style.vvmFile);
-                          return (
-                            <Pressable
-                              key={style.styleId}
-                              onPress={() =>
-                                handleSelectLocalVoicevoxStyle(style.vvmFile, style.styleId)
-                              }
-                              disabled={downloadingVvmFile != null}
-                              style={[styles.chip, selected && styles.chipActive]}
+              // 検索していない間は、43人分すべてを縦に並べると長くなりすぎるため、
+              // 表示件数をいったん絞る(フラットな一覧側のVOICE_LIST_CAPと同じ考え方)。
+              const LOCAL_SPEAKER_CAP = 16;
+              const visibleGroups =
+                !filterLower && !showAllLocalSpeakers
+                  ? filteredGroups.slice(0, LOCAL_SPEAKER_CAP)
+                  : filteredGroups;
+              const hiddenGroupCount = filteredGroups.length - visibleGroups.length;
+              return (
+                <>
+                  {/* 折りたたんだ話者名は短い「チップ」なので、1行1人ではなく
+                      複数人を横に並べて縦の長さを抑える(展開中の話者だけ全幅で表示)。 */}
+                  <View style={styles.speakerGrid}>
+                    {visibleGroups.map((group) => {
+                      // 検索で絞り込んでいる間は、探している話者をすぐ見られるよう自動的に展開する
+                      const isExpanded =
+                        filterLower.length > 0 || expandedLocalVoicevoxSpeakers.has(group.speakerName);
+                      const downloadedCount = group.styles.filter((s) =>
+                        downloadedVvmFiles.includes(s.vvmFile)
+                      ).length;
+                      const hasSelected = group.styles.some(
+                        (s) => s.styleId === settings.voice.localVoicevox.selectedStyleId
+                      );
+                      return (
+                        <View
+                          key={group.speakerName}
+                          style={[styles.speakerGroup, isExpanded && styles.speakerGroupExpanded]}
+                        >
+                          <Pressable
+                            onPress={() => toggleLocalVoicevoxSpeakerExpanded(group.speakerName)}
+                            style={({ pressed }) => [
+                              styles.speakerHeader,
+                              hasSelected && styles.speakerHeaderActive,
+                              pressed && styles.pressedOpacity,
+                            ]}
+                          >
+                            <Text
+                              style={[styles.speakerHeaderText, hasSelected && styles.speakerHeaderTextActive]}
                             >
-                              <Text style={[styles.chipText, selected && styles.chipTextActive]}>
-                                {downloaded ? "✓ " : "⬇ "}
-                                {style.styleName}
-                              </Text>
-                            </Pressable>
-                          );
-                        })}
-                      </View>
-                    ) : null}
+                              {isExpanded ? "▾" : "▸"} {group.speakerName}
+                              {downloadedCount > 0
+                                ? `　DL済み ${downloadedCount}/${group.styles.length}`
+                                : `　${group.styles.length}種類`}
+                            </Text>
+                          </Pressable>
+                          {isExpanded ? (
+                            <View style={styles.chipWrap}>
+                              {group.styles.map((style) => {
+                                const selected =
+                                  settings.voice.localVoicevox.selectedStyleId === style.styleId;
+                                const downloaded = downloadedVvmFiles.includes(style.vvmFile);
+                                return (
+                                  <Pressable
+                                    key={style.styleId}
+                                    onPress={() =>
+                                      handleSelectLocalVoicevoxStyle(style.vvmFile, style.styleId)
+                                    }
+                                    disabled={downloadingVvmFile != null}
+                                    style={({ pressed }) => [
+                                      styles.chip,
+                                      selected && styles.chipActive,
+                                      pressed && styles.pressedOpacity,
+                                    ]}
+                                  >
+                                    <Text style={[styles.chipText, selected && styles.chipTextActive]}>
+                                      {downloaded ? "✓ " : "⬇ "}
+                                      {style.styleName}
+                                    </Text>
+                                  </Pressable>
+                                );
+                              })}
+                            </View>
+                          ) : null}
+                        </View>
+                      );
+                    })}
                   </View>
-                );
-              });
+                  {hiddenGroupCount > 0 ? (
+                    <Pressable
+                      onPress={() => setShowAllLocalSpeakers(true)}
+                      style={({ pressed }) => [{ marginTop: 4 }, pressed && styles.pressedOpacity]}
+                    >
+                      <Text style={styles.linkText}>他{hiddenGroupCount}人をすべて表示</Text>
+                    </Pressable>
+                  ) : null}
+                </>
+              );
             })()}
 
             {downloadedVvmFiles.length > 0 ? (
@@ -1139,7 +1186,7 @@ export default function SettingsScreen() {
                     <Pressable
                       key={vvmFileName}
                       onPress={() => handleDeleteLocalVvm(vvmFileName)}
-                      style={styles.chip}
+                      style={({ pressed }) => [styles.chip, pressed && styles.pressedOpacity]}
                     >
                       <Text style={styles.chipText}>🗑 {vvmFileName} を削除</Text>
                     </Pressable>
@@ -1205,7 +1252,11 @@ export default function SettingsScreen() {
                                 ? onSelectGoogleVoice(v.id)
                                 : onSelectSystemVoice(v.id)
                             }
-                            style={[styles.chip, activeSelectedId === v.id && styles.chipActive]}
+                            style={({ pressed }) => [
+                              styles.chip,
+                              activeSelectedId === v.id && styles.chipActive,
+                              pressed && styles.pressedOpacity,
+                            ]}
                           >
                             <Text
                               style={[
@@ -1220,7 +1271,10 @@ export default function SettingsScreen() {
                       </View>
                     )}
                     {hiddenCount > 0 ? (
-                      <Pressable onPress={() => setShowAllVoices(true)} style={{ marginTop: 8 }}>
+                      <Pressable
+                        onPress={() => setShowAllVoices(true)}
+                        style={({ pressed }) => [{ marginTop: 8 }, pressed && styles.pressedOpacity]}
+                      >
                         <Text style={styles.linkText}>他{hiddenCount}件をすべて表示</Text>
                       </Pressable>
                     ) : null}
@@ -1231,8 +1285,19 @@ export default function SettingsScreen() {
           </>
         )}
 
-        <Pressable style={styles.testButton} onPress={testVoice}>
-          <Text style={styles.testButtonText}>▶ この声を試聴する</Text>
+        <Pressable
+          style={({ pressed }) => [
+            styles.testButton,
+            (pressed || isTestingVoice) && styles.testButtonPressed,
+          ]}
+          onPress={testVoice}
+          disabled={isTestingVoice}
+        >
+          {isTestingVoice ? (
+            <ActivityIndicator size="small" color="#2F5BD9" />
+          ) : (
+            <Text style={styles.testButtonText}>▶ この声を試聴する</Text>
+          )}
         </Pressable>
 
         <View style={styles.stepperRow}>
@@ -1612,7 +1677,10 @@ function Section({ title, children }: { title: string; children: React.ReactNode
 
 function StepperBtn({ label, onPress }: { label: string; onPress: () => void }) {
   return (
-    <Pressable style={styles.stepperBtn} onPress={onPress}>
+    <Pressable
+      style={({ pressed }) => [styles.stepperBtn, pressed && styles.pressedOpacity]}
+      onPress={onPress}
+    >
       <Text style={styles.stepperBtnText}>{label}</Text>
     </Pressable>
   );
@@ -1721,30 +1789,39 @@ const styles = StyleSheet.create({
     borderRadius: 16,
     backgroundColor: "#EDEEF5",
   },
-  speakerGroup: { marginBottom: 8 },
+  // 折りたたんだ話者名を(1人1行ではなく)複数人ぶん横に並べて縦の長さを抑えるための行
+  speakerGrid: { flexDirection: "row", flexWrap: "wrap", gap: 6 },
+  speakerGroup: {},
+  // 展開中の話者だけは、その下のスタイル一覧を全幅で見せたいので行全体を占有させる
+  speakerGroupExpanded: { width: "100%" },
   speakerHeader: {
-    paddingHorizontal: 12,
-    paddingVertical: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
     borderRadius: 10,
     backgroundColor: "#EDEEF5",
     marginBottom: 6,
     alignSelf: "flex-start",
   },
   speakerHeaderActive: { backgroundColor: "#DCE4FF" },
-  speakerHeaderText: { fontSize: 12, fontWeight: "600", color: "#4A4A60" },
+  speakerHeaderText: { fontSize: 11, fontWeight: "600", color: "#4A4A60" },
   speakerHeaderTextActive: { color: "#2F5BD9" },
   chipActive: { backgroundColor: "#4A7DFF" },
   chipText: { fontSize: 12, color: "#4A4A60" },
   chipTextActive: { color: "#fff", fontWeight: "600" },
   row: { flexDirection: "row", alignItems: "center", justifyContent: "space-between" },
+  // 押した瞬間に押されたことがわかるよう、押下中は薄くする
+  pressedOpacity: { opacity: 0.55 },
   testButton: {
     marginTop: 12,
     alignSelf: "flex-start",
+    minWidth: 92,
+    alignItems: "center",
     backgroundColor: "#E4EBFF",
     paddingHorizontal: 14,
     paddingVertical: 8,
     borderRadius: 10,
   },
+  testButtonPressed: { opacity: 0.6 },
   testButtonText: { color: "#2F5BD9", fontWeight: "600", fontSize: 12 },
   stepperRow: {
     flexDirection: "row",
