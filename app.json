@@ -52,7 +52,8 @@
         {
           "iosUrlScheme": "com.googleusercontent.apps.PLACEHOLDER-not-used-ios-not-built-by-this-project"
         }
-      ]
+      ],
+      "./plugins/withExtractNativeLibs"
     ],
     "experiments": {
       "typedRoutes": true
