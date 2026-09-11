@@ -11,6 +11,17 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 add_library(voicevox_core SHARED IMPORTED)
 set_target_properties(voicevox_core PROPERTIES
   IMPORTED_LOCATION "${CMAKE_CURRENT_SOURCE_DIR}/../jniLibs/${ANDROID_ABI}/libvoicevox_core.so"
+  # IMPORTED_SONAMEを明示しないと、リンカがIMPORTED_LOCATIONのビルド時の絶対パス
+  # (CIランナー上の /home/runner/work/... のようなパス)をそのままvoicevox_jni.so の
+  # DT_NEEDEDに焼き込んでしまうことがある。その場合、実機では当然その絶対パスが
+  # 存在しないため、実際にはAPKに同梱されているlibvoicevox_core.so自体は正しい場所
+  # (lib/${ANDROID_ABI}/)にあるにもかかわらず
+  # 「dlopen failed: library "/home/runner/work/.../libvoicevox_core.so" not found」
+  # という実行時エラーになる。SONAMEを"libvoicevox_core.so"(ファイル名のみ)に
+  # 固定することで、DT_NEEDEDには名前だけが記録されるようになり、Androidのリンカが
+  # 同じネイティブライブラリ namespace(APK内のlib/${ANDROID_ABI}/)から正しく
+  # 解決できるようになる。
+  IMPORTED_SONAME "libvoicevox_core.so"
 )
 
 add_library(voicevox_jni SHARED
