@@ -18,6 +18,7 @@ import { VoiceButton } from "../components/VoiceButton";
 import { streamAiReply, AiConfigError, AiRequestError } from "../lib/ai";
 import { hasPaidAccess } from "../lib/billing";
 import { getGoogleIdToken } from "../lib/googleAuth";
+import { warmUpLocalVoicevox } from "../lib/localVoicevox";
 import { MEMORY_UPDATE_INTERVAL_MESSAGES, updateUserMemory } from "../lib/memory";
 import { loadHistory, loadSettings, saveHistory, saveSettings } from "../lib/storage";
 import { pullFromDriveIfNewer, pushToDriveInBackground } from "../lib/sync";
@@ -59,13 +60,21 @@ function enqueueWithGate(
 /**
  * VOICEVOXサーバー(自前ホスティング/共有サーバーいずれも)が無料枠ホスティングの
  * スリープから起きるまでの初回遅延を減らすため、実際に読み上げが必要になる前に
- * 軽いリクエストを投げて事前に起こしておく。読み上げに端末内蔵ボイスしか
- * 使わない設定の場合は何もしない。
+ * 軽いリクエストを投げて事前に起こしておく。内蔵VOICEVOX(voicevox_local)の場合は
+ * 同様の理由で、エンジン初期化・声データの読み込みを事前に済ませておく
+ * (どちらも実際の読み上げ時にかかる「初回の数秒のタイムラグ」を減らすための処理)。
+ * 読み上げに端末内蔵ボイスしか使わない設定の場合は何もしない。
  */
 function warmUpVoiceIfNeeded(settings: AppSettings) {
   const voice = resolveVoiceSettings(settings);
   if (voice.provider === "voicevox" && voice.voicevox.baseUrl) {
     warmUpVoicevoxServer(voice.voicevox.baseUrl);
+  } else if (
+    voice.provider === "voicevox_local" &&
+    hasPaidAccess(settings.billing) &&
+    voice.localVoicevox.selectedStyleId != null
+  ) {
+    warmUpLocalVoicevox(voice.localVoicevox.selectedStyleId);
   }
 }
 
@@ -307,13 +316,20 @@ export default function ChatScreen() {
         <Text style={styles.disclaimer} numberOfLines={2}>
           {APP_DISCLAIMER}
         </Text>
-        <Pressable onPress={() => router.push("/settings")} hitSlop={10}>
+        <Pressable
+          onPress={() => router.push("/settings")}
+          hitSlop={10}
+          style={({ pressed }) => pressed && styles.pressedOpacity}
+        >
           <Text style={styles.settingsIcon}>⚙️</Text>
         </Pressable>
       </View>
 
       {errorBanner ? (
-        <Pressable style={styles.errorBanner} onPress={() => setErrorBanner(null)}>
+        <Pressable
+          style={({ pressed }) => [styles.errorBanner, pressed && styles.pressedOpacity]}
+          onPress={() => setErrorBanner(null)}
+        >
           <Text style={styles.errorText}>{errorBanner}</Text>
         </Pressable>
       ) : null}
@@ -328,12 +344,15 @@ export default function ChatScreen() {
             accentColor={theme.buttonColor}
             onSpeak={
               item.role === "assistant" && item.id !== "__streaming__"
-                ? (t) =>
+                ? (t, cb) =>
                     speakWithGate(t, settings, {
-                      onError: () =>
+                      onDone: cb?.onDone,
+                      onError: (error) => {
                         setErrorBanner(
                           "音声の再生に失敗しました。設定画面の「読み上げ音声」設定をご確認ください。"
-                        ),
+                        );
+                        cb?.onError?.(error);
+                      },
                     })
                 : undefined
             }
@@ -381,10 +400,11 @@ export default function ChatScreen() {
           editable={!isSending}
         />
         <Pressable
-          style={[
+          style={({ pressed }) => [
             styles.sendButton,
             { backgroundColor: theme.buttonColor },
             (isSending || !inputText.trim()) && styles.sendDisabled,
+            pressed && !isSending && inputText.trim() && styles.pressedOpacity,
           ]}
           disabled={isSending || !inputText.trim()}
           onPress={() => sendMessage(inputText, "text")}
@@ -402,6 +422,8 @@ export default function ChatScreen() {
 
 const styles = StyleSheet.create({
   centered: { flex: 1, alignItems: "center", justifyContent: "center" },
+  // ボタンを押した瞬間に「押されたこと」が視覚的にわかるよう、押下中は薄くする
+  pressedOpacity: { opacity: 0.55 },
   headerBar: {
     flexDirection: "row",
     alignItems: "center",
