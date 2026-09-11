@@ -1,0 +1,1778 @@
+import { useEffect, useState } from "react";
+import {
+  ActivityIndicator,
+  Alert,
+  Linking,
+  Platform,
+  Pressable,
+  ScrollView,
+  StyleSheet,
+  Switch,
+  Text,
+  TextInput,
+  View,
+} from "react-native";
+import { useRouter } from "expo-router";
+import * as Clipboard from "expo-clipboard";
+
+import { ColorSwatchPicker } from "../components/ColorSwatchPicker";
+import { PERSONA_PRESETS } from "../lib/personas";
+import {
+  deleteVvm,
+  downloadVvm,
+  isLocalVoicevoxSupported,
+  isVvmDownloaded,
+  listDownloadedVvmFiles,
+} from "../lib/localVoicevox";
+import { LOCAL_VOICEVOX_CATALOG, LOCAL_VOICEVOX_SPEAKER_GROUPS } from "../lib/voicevoxVvmCatalog";
+import {
+  isBillingConfigured,
+  isGoogleSyncConfigured,
+  isSharedProxyConfigured,
+  isSharedVoicevoxConfigured,
+  SHARED_VOICEVOX_URL,
+} from "../lib/config";
+import { connectOpenRouterAccount } from "../lib/openrouterOAuth";
+import {
+  connectGoogleAccount,
+  disconnectGoogleAccount,
+  getGoogleIdToken,
+  GoogleAuthError,
+} from "../lib/googleAuth";
+import { BillingCheckError, buildSubscribeUrl, checkBillingStatus, hasPaidAccess } from "../lib/billing";
+import { clearHistory, loadSettings, saveSettings } from "../lib/storage";
+import {
+  COLOR_SWATCHES,
+  DEFAULT_THEME_COLORS,
+  resolveThemeColors,
+  THEME_PRESET_LIST,
+} from "../lib/theme";
+import {
+  AiConnectionMode,
+  AppSettings,
+  CustomThemeColors,
+  PersonaPresetId,
+  ThemePresetId,
+  TtsProviderId,
+  VoiceOption,
+} from "../lib/types";
+import {
+  listAvailableVoices,
+  listGoogleTtsVoices,
+  listVoicevoxSpeakers,
+  speakText,
+} from "../lib/voiceOutput";
+import {
+  getCachedGoogleVoices,
+  getCachedVoicevoxVoices,
+  setCachedGoogleVoices,
+  setCachedVoicevoxVoices,
+} from "../lib/voiceListCache";
+
+const GOOGLE_TTS_SETUP_URL =
+  "https://console.cloud.google.com/apis/library/texttospeech.googleapis.com";
+
+// 共有プロキシ経由で選べるモデル(proxy-worker側のALLOWED_MODELSと合わせること)
+const PROXY_MODEL_PRESETS = [
+  {
+    label: "高速重視",
+    model: "openai/gpt-oss-20b",
+    note: "最速クラスの応答。日常会話にはこちらがおすすめです。",
+  },
+  {
+    label: "精度重視",
+    model: "openai/gpt-oss-120b",
+    note: "高速重視より少し時間がかかりますが、文脈理解や表現の自然さが向上します。",
+  },
+];
+
+// 「自分のAPIキーを使う」モード用のプリセット
+const CUSTOM_AI_PROVIDER_PRESETS = [
+  {
+    label: "Groq: 高速重視",
+    baseUrl: "https://api.groq.com/openai/v1",
+    model: "openai/gpt-oss-20b",
+    note: "最速クラスの応答。日常会話にはこちらがおすすめです。",
+  },
+  {
+    label: "Groq: 精度重視",
+    baseUrl: "https://api.groq.com/openai/v1",
+    model: "openai/gpt-oss-120b",
+    note: "高速重視より少し時間がかかりますが、文脈理解や表現の自然さが向上します。",
+  },
+  {
+    label: "OpenRouter (無料モデル)",
+    baseUrl: "https://openrouter.ai/api/v1",
+    model: "meta-llama/llama-3.1-8b-instruct:free",
+    note: "openrouter.ai で無料枠のAPIキーを発行できます(:free モデルのみ利用)。",
+  },
+];
+
+const GROQ_MODELS_DOC_URL = "https://console.groq.com/docs/models";
+const GROQ_KEYS_URL = "https://console.groq.com/keys";
+const OPENROUTER_PRESET = CUSTOM_AI_PROVIDER_PRESETS[2]; // "OpenRouter (無料モデル)"
+
+/**
+ * Alert.alert はWeb版(react-native-web)では何も表示せず素通りしてしまうため、
+ * Web版では window.alert / window.confirm にフォールバックする。
+ * (ネイティブ版では従来どおり Alert.alert を使う)
+ */
+/**
+ * 音声再生の失敗理由(unknown)から、可能な範囲で人間が読める文字列を取り出す。
+ * 例外オブジェクト(Error.message)、ネイティブモジュールのエラー(codeやmessage
+ * プロパティを持つオブジェクト)、Web SpeechSynthesisErrorEvent(errorプロパティ)
+ * など、形が定まらないため緩く扱う。何も取り出せない場合はnullを返す。
+ */
+function describeVoiceError(error: unknown): string | null {
+  if (!error) return null;
+  if (error instanceof Error) return error.message;
+  if (typeof error === "string") return error;
+  if (typeof error === "object") {
+    const anyErr = error as Record<string, unknown>;
+    const message = anyErr.message ?? anyErr.error ?? anyErr.code;
+    if (typeof message === "string" && message.trim()) return message;
+  }
+  try {
+    const text = JSON.stringify(error);
+    return text && text !== "{}" ? text : null;
+  } catch {
+    return null;
+  }
+}
+
+function showAlert(title: string, message?: string) {
+  if (Platform.OS === "web") {
+    if (typeof window !== "undefined" && typeof window.alert === "function") {
+      window.alert(message ? `${title}\n\n${message}` : title);
+    }
+    return;
+  }
+  Alert.alert(title, message);
+}
+
+function showConfirm(
+  title: string,
+  message: string,
+  confirmLabel: string,
+  onConfirm: () => void,
+  destructive = false
+) {
+  if (Platform.OS === "web") {
+    if (typeof window !== "undefined" && window.confirm(`${title}\n\n${message}`)) {
+      onConfirm();
+    }
+    return;
+  }
+  Alert.alert(title, message, [
+    { text: "キャンセル", style: "cancel" },
+    { text: confirmLabel, style: destructive ? "destructive" : "default", onPress: onConfirm },
+  ]);
+}
+
+export default function SettingsScreen() {
+  const router = useRouter();
+  const [settings, setSettings] = useState<AppSettings | null>(null);
+  const [systemVoices, setSystemVoices] = useState<VoiceOption[]>([]);
+  const [voicevoxSpeakers, setVoicevoxSpeakers] = useState<VoiceOption[]>([]);
+  const [voicevoxUrlDraft, setVoicevoxUrlDraft] = useState("");
+  const [voicevoxLoading, setVoicevoxLoading] = useState(false);
+  const [voicevoxError, setVoicevoxError] = useState<string | null>(null);
+  const [googleVoices, setGoogleVoices] = useState<VoiceOption[]>([]);
+  const [googleApiKeyDraft, setGoogleApiKeyDraft] = useState("");
+  const [googleLoading, setGoogleLoading] = useState(false);
+  const [googleError, setGoogleError] = useState<string | null>(null);
+  const [downloadedVvmFiles, setDownloadedVvmFiles] = useState<string[]>([]);
+  const [downloadingVvmFile, setDownloadingVvmFile] = useState<string | null>(null);
+  const [downloadProgress, setDownloadProgress] = useState<number | null>(null);
+  const [localVoicevoxError, setLocalVoicevoxError] = useState<string | null>(null);
+  const [customPersonaText, setCustomPersonaText] = useState("");
+  const [openRouterConnecting, setOpenRouterConnecting] = useState(false);
+  const [googleAccountConnecting, setGoogleAccountConnecting] = useState(false);
+  const [googleAccountError, setGoogleAccountError] = useState<string | null>(null);
+  const [billingChecking, setBillingChecking] = useState(false);
+  const [customColorDraft, setCustomColorDraft] = useState<CustomThemeColors>({
+    ...DEFAULT_THEME_COLORS,
+  });
+  // 音声選択のスクロールが長すぎる問題への対策: system/voicevox/googleの
+  // フラットな一覧は検索絞り込み+初期表示件数の制限で、内蔵VOICEVOXの
+  // 話者一覧は話者単位の折りたたみ+検索絞り込みで、それぞれスクロール量を抑える。
+  const [voiceFilterText, setVoiceFilterText] = useState("");
+  const [showAllVoices, setShowAllVoices] = useState(false);
+  const [localVoicevoxFilterText, setLocalVoicevoxFilterText] = useState("");
+  const [expandedLocalVoicevoxSpeakers, setExpandedLocalVoicevoxSpeakers] = useState<Set<string>>(
+    new Set()
+  );
+
+  useEffect(() => {
+    (async () => {
+      let s = await loadSettings();
+      // 有料プラン(または管理者)で、まだVOICEVOXの接続先を自分で設定していない場合は、
+      // 「備え付けのAI」と同じ考え方で、共有VOICEVOXサーバーへ自動的に接続する。
+      // (自分専用のVOICEVOXサーバーを使いたい人は、下のURL欄で個別に上書きできる)
+      if (!s.voice.voicevox.baseUrl && hasPaidAccess(s.billing) && isSharedVoicevoxConfigured()) {
+        s = {
+          ...s,
+          voice: { ...s.voice, voicevox: { ...s.voice.voicevox, baseUrl: SHARED_VOICEVOX_URL } },
+        };
+        await saveSettings(s);
+      }
+      setSettings(s);
+      setCustomPersonaText(s.persona.customDescription);
+      setVoicevoxUrlDraft(s.voice.voicevox.baseUrl);
+      setGoogleApiKeyDraft(s.voice.google.apiKey);
+      setCustomColorDraft(s.theme.customColors ?? { ...DEFAULT_THEME_COLORS });
+      const v = await listAvailableVoices();
+      setSystemVoices(v);
+      // 画面を行き来するたびに毎回サーバーへ問い合わせるのを避けるため、
+      // まずキャッシュを見る。無ければ(初回、またはURL/キー変更後のみ)取得する。
+      if (s.voice.voicevox.baseUrl) {
+        const cached = getCachedVoicevoxVoices(s.voice.voicevox.baseUrl);
+        if (cached) {
+          setVoicevoxSpeakers(cached);
+        } else {
+          fetchVoicevoxSpeakers(s.voice.voicevox.baseUrl, false);
+        }
+      }
+      if (s.voice.google.apiKey) {
+        const cached = getCachedGoogleVoices(s.voice.google.apiKey);
+        if (cached) {
+          setGoogleVoices(cached);
+        } else {
+          fetchGoogleVoices(s.voice.google.apiKey, false);
+        }
+      }
+      if (isLocalVoicevoxSupported()) {
+        setDownloadedVvmFiles(listDownloadedVvmFiles());
+      }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // 上のuseEffectは画面マウント時に一度しか走らないため、「この設定画面に
+  // 居続けたまま」Googleアカウント連携→課金状態確認を行って初めて有料プラン
+  // (管理者含む)が有効になったケースでは、共有VOICEVOXサーバーへの自動接続が
+  // 反映されない(=「VOICEVOXのURLが自動入力されない」)。billing.statusが
+  // 変化するたびに同じ条件を再チェックすることでこれを解消する。
+  useEffect(() => {
+    if (!settings) return;
+    if (
+      !settings.voice.voicevox.baseUrl &&
+      hasPaidAccess(settings.billing) &&
+      isSharedVoicevoxConfigured()
+    ) {
+      const next: AppSettings = {
+        ...settings,
+        voice: {
+          ...settings.voice,
+          voicevox: { ...settings.voice.voicevox, baseUrl: SHARED_VOICEVOX_URL },
+        },
+      };
+      setVoicevoxUrlDraft(SHARED_VOICEVOX_URL);
+      persist(next);
+      const cached = getCachedVoicevoxVoices(SHARED_VOICEVOX_URL);
+      if (cached) {
+        setVoicevoxSpeakers(cached);
+      } else {
+        fetchVoicevoxSpeakers(SHARED_VOICEVOX_URL, false);
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [settings?.billing.status]);
+
+  if (!settings) return null;
+
+  const update = (updater: (draft: AppSettings) => AppSettings) => {
+    setSettings((prev) => (prev ? updater(prev) : prev));
+  };
+
+  const persist = async (next: AppSettings) => {
+    setSettings(next);
+    await saveSettings(next);
+  };
+
+  const onSelectPersona = (id: PersonaPresetId) => {
+    persist({ ...settings, persona: { ...settings.persona, presetId: id } });
+  };
+
+  const onBlurCustomDescription = () => {
+    persist({
+      ...settings,
+      persona: { ...settings.persona, customDescription: customPersonaText },
+    });
+  };
+
+  const onSelectTtsProvider = (provider: TtsProviderId) => {
+    if ((provider === "voicevox" || provider === "voicevox_local") && !hasPaidAccess(settings.billing)) {
+      showAlert(
+        "有料プランが必要です",
+        "VOICEVOX(端末にない読み上げボイス)のご利用には、有料プランへの加入が必要です。下の「利用プラン」欄からご確認ください。"
+      );
+      return;
+    }
+    // 音源を切り替えたら、前の音源で絞り込んでいた検索文字列は引き継がない
+    setVoiceFilterText("");
+    setShowAllVoices(false);
+    setLocalVoicevoxFilterText("");
+    persist({ ...settings, voice: { ...settings.voice, provider } });
+  };
+
+  const toggleLocalVoicevoxSpeakerExpanded = (speakerName: string) => {
+    setExpandedLocalVoicevoxSpeakers((prev) => {
+      const next = new Set(prev);
+      if (next.has(speakerName)) {
+        next.delete(speakerName);
+      } else {
+        next.add(speakerName);
+      }
+      return next;
+    });
+  };
+
+  const handleSelectLocalVoicevoxStyle = async (vvmFileName: string, styleId: number) => {
+    setLocalVoicevoxError(null);
+    if (!isVvmDownloaded(vvmFileName)) {
+      setDownloadingVvmFile(vvmFileName);
+      setDownloadProgress(0);
+      try {
+        await downloadVvm(vvmFileName, (ratio) => setDownloadProgress(ratio));
+        setDownloadedVvmFiles(listDownloadedVvmFiles());
+      } catch (e) {
+        setLocalVoicevoxError(
+          e instanceof Error ? e.message : "ダウンロードに失敗しました。電波状況を確認してください。"
+        );
+        return;
+      } finally {
+        setDownloadingVvmFile(null);
+        setDownloadProgress(null);
+      }
+    }
+    persist({
+      ...settings,
+      voice: { ...settings.voice, localVoicevox: { selectedStyleId: styleId } },
+    });
+  };
+
+  const handleDeleteLocalVvm = (vvmFileName: string) => {
+    const doDelete = () => {
+      deleteVvm(vvmFileName);
+      setDownloadedVvmFiles(listDownloadedVvmFiles());
+      const entry = LOCAL_VOICEVOX_CATALOG.find((e) => e.vvmFile === vvmFileName);
+      const selectedInThisFile = entry?.styles.some(
+        (s) => s.styleId === settings.voice.localVoicevox.selectedStyleId
+      );
+      if (selectedInThisFile) {
+        persist({
+          ...settings,
+          voice: { ...settings.voice, localVoicevox: { selectedStyleId: null } },
+        });
+      }
+    };
+    showConfirm(
+      "ダウンロード済みデータを削除しますか？",
+      "この声を再度使うには、もう一度ダウンロードが必要になります。",
+      "削除する",
+      doDelete,
+      true
+    );
+  };
+
+  const onSelectSystemVoice = (id: string) => {
+    persist({ ...settings, voice: { ...settings.voice, selectedVoiceId: id } });
+  };
+
+  const onSelectVoicevoxSpeaker = (id: string) => {
+    persist({
+      ...settings,
+      voice: {
+        ...settings.voice,
+        voicevox: { ...settings.voice.voicevox, speakerId: Number(id) },
+      },
+    });
+  };
+
+  const fetchVoicevoxSpeakers = async (baseUrl: string, persistUrl: boolean) => {
+    if (!baseUrl.trim()) return;
+    setVoicevoxLoading(true);
+    setVoicevoxError(null);
+    try {
+      const speakers = await listVoicevoxSpeakers(baseUrl);
+      setVoicevoxSpeakers(speakers);
+      setCachedVoicevoxVoices(baseUrl, speakers);
+      if (persistUrl) {
+        await persist({
+          ...settings,
+          voice: { ...settings.voice, voicevox: { ...settings.voice.voicevox, baseUrl } },
+        });
+      }
+    } catch (e) {
+      setVoicevoxError(
+        e instanceof Error
+          ? e.message
+          : "VOICEVOXエンジンに接続できませんでした。URLを確認してください。"
+      );
+      setVoicevoxSpeakers([]);
+    } finally {
+      setVoicevoxLoading(false);
+    }
+  };
+
+  const onSelectGoogleVoice = (id: string) => {
+    persist({
+      ...settings,
+      voice: { ...settings.voice, google: { ...settings.voice.google, voiceName: id } },
+    });
+  };
+
+  const fetchGoogleVoices = async (apiKey: string, persistKey: boolean) => {
+    if (!apiKey.trim()) return;
+    setGoogleLoading(true);
+    setGoogleError(null);
+    try {
+      const voices = await listGoogleTtsVoices(apiKey);
+      setGoogleVoices(voices);
+      setCachedGoogleVoices(apiKey, voices);
+      if (persistKey) {
+        await persist({
+          ...settings,
+          voice: { ...settings.voice, google: { ...settings.voice.google, apiKey } },
+        });
+      }
+    } catch (e) {
+      setGoogleError(
+        e instanceof Error
+          ? e.message
+          : "Google Cloud TTSに接続できませんでした。APIキーを確認してください。"
+      );
+      setGoogleVoices([]);
+    } finally {
+      setGoogleLoading(false);
+    }
+  };
+
+  const handlePasteGoogleApiKey = async () => {
+    const text = await Clipboard.getStringAsync();
+    if (!text.trim()) {
+      showAlert("クリップボードが空です", "先にAPIキーをコピーしてから、もう一度お試しください。");
+      return;
+    }
+    setGoogleApiKeyDraft(text.trim());
+  };
+
+  const handleOpenGoogleTtsSetupPage = () => {
+    Linking.openURL(GOOGLE_TTS_SETUP_URL);
+  };
+
+  const onToggleAutoSpeak = (value: boolean) => {
+    persist({ ...settings, voice: { ...settings.voice, autoSpeak: value } });
+  };
+
+  const adjustRate = (delta: number) => {
+    const rate = clamp(settings.voice.rate + delta, 0.5, 1.8);
+    persist({ ...settings, voice: { ...settings.voice, rate } });
+  };
+
+  const adjustPitch = (delta: number) => {
+    const pitch = clamp(settings.voice.pitch + delta, 0.5, 1.8);
+    persist({ ...settings, voice: { ...settings.voice, pitch } });
+  };
+
+  const onSelectAiMode = (mode: AiConnectionMode) => {
+    if (mode === "proxy" && settings.ai.mode !== "proxy" && !hasPaidAccess(settings.billing)) {
+      showAlert(
+        "有料プランが必要です",
+        "備え付けのAI(共有プロキシ)のご利用には、有料プランへの加入が必要です。上の「利用プラン」欄からご確認いただくか、「自分のAPIキーを使う」をお使いください。"
+      );
+      return;
+    }
+    if (mode === "proxy") {
+      persist({
+        ...settings,
+        ai: {
+          ...settings.ai,
+          mode,
+          providerLabel: "共有プロキシ（設定不要）",
+          baseUrl: "",
+          apiKey: "",
+          model: PROXY_MODEL_PRESETS.some((p) => p.model === settings.ai.model)
+            ? settings.ai.model
+            : PROXY_MODEL_PRESETS[0].model,
+        },
+      });
+    } else {
+      const preset = CUSTOM_AI_PROVIDER_PRESETS[0];
+      persist({
+        ...settings,
+        ai: {
+          ...settings.ai,
+          mode,
+          providerLabel: preset.label,
+          baseUrl: preset.baseUrl,
+          model: preset.model,
+        },
+      });
+    }
+  };
+
+  const applyProxyModelPreset = (preset: (typeof PROXY_MODEL_PRESETS)[number]) => {
+    persist({ ...settings, ai: { ...settings.ai, providerLabel: preset.label, model: preset.model } });
+  };
+
+  const applyProviderPreset = (preset: (typeof CUSTOM_AI_PROVIDER_PRESETS)[number]) => {
+    persist({
+      ...settings,
+      ai: {
+        ...settings.ai,
+        providerLabel: preset.label,
+        baseUrl: preset.baseUrl,
+        model: preset.model,
+      },
+    });
+  };
+
+  const onChangeApiKey = (key: string) => {
+    update((d) => ({ ...d, ai: { ...d.ai, apiKey: key } }));
+  };
+  const onBlurApiKey = () => persist(settings);
+
+  const handleOpenRouterConnect = async () => {
+    if (openRouterConnecting) return;
+    setOpenRouterConnecting(true);
+    try {
+      const apiKey = await connectOpenRouterAccount();
+      if (apiKey) {
+        await persist({
+          ...settings,
+          ai: {
+            ...settings.ai,
+            mode: "custom",
+            providerLabel: OPENROUTER_PRESET.label,
+            baseUrl: OPENROUTER_PRESET.baseUrl,
+            model: OPENROUTER_PRESET.model,
+            apiKey,
+          },
+        });
+        showAlert("接続しました", "OpenRouterのAPIキーを自動で設定しました。このまま会話を始められます。");
+      }
+      // apiKeyがnull(利用者がキャンセル)の場合は何もしない
+    } catch (e) {
+      showAlert(
+        "接続できませんでした",
+        e instanceof Error ? e.message : "しばらくしてから再度お試しください。"
+      );
+    } finally {
+      setOpenRouterConnecting(false);
+    }
+  };
+
+  const handleOpenGroqKeysPage = () => {
+    Linking.openURL(GROQ_KEYS_URL);
+  };
+
+  const handlePasteApiKey = async () => {
+    const text = await Clipboard.getStringAsync();
+    if (!text.trim()) {
+      showAlert("クリップボードが空です", "先にAPIキーをコピーしてから、もう一度お試しください。");
+      return;
+    }
+    await persist({ ...settings, ai: { ...settings.ai, apiKey: text.trim() } });
+  };
+
+  const onChangeModel = (model: string) => {
+    update((d) => ({ ...d, ai: { ...d.ai, model } }));
+  };
+  const onBlurModel = () => persist(settings);
+
+  /**
+   * 課金状態の確認に使う、検証済みメールアドレス入りのIDトークンを取得する。
+   * Google未連携/トークン期限切れ(Web版で約1時間)の場合は null を返す。
+   */
+  const getBillingIdToken = async (): Promise<string | null> => {
+    if (!settings.google.connected) return null;
+    return getGoogleIdToken();
+  };
+
+  const handleCheckBillingStatus = async () => {
+    if (billingChecking) return;
+    if (!settings.google.connected) {
+      showAlert("Googleアカウント連携が必要です", "下の「Googleアカウント連携」からログインしてください。");
+      return;
+    }
+    setBillingChecking(true);
+    try {
+      const idToken = await getBillingIdToken();
+      if (!idToken) {
+        showAlert(
+          "サインインが必要です",
+          "Google連携の認証が切れています。下の「Googleアカウント連携」から再度サインインしてください。"
+        );
+        return;
+      }
+      const result = await checkBillingStatus(idToken);
+      await persist({
+        ...settings,
+        billing: {
+          status: result.status,
+          expiresAt: result.expiresAt,
+          lastCheckedAt: Date.now(),
+        },
+      });
+      if (result.status === "admin") {
+        showAlert("確認できました", "管理者として全機能をご利用いただけます。");
+      } else if (result.status === "active") {
+        showAlert("確認できました", "有料プランが有効です。備え付けのAI・VOICEVOXがご利用いただけます。");
+      } else {
+        showAlert(
+          "未加入です",
+          "このGoogleアカウントでは有料プランが確認できませんでした。加入直後の場合は、反映まで数分かかることがあります。"
+        );
+      }
+    } catch (e) {
+      showAlert(
+        "確認できませんでした",
+        e instanceof BillingCheckError ? e.message : "しばらくしてから再度お試しください。"
+      );
+    } finally {
+      setBillingChecking(false);
+    }
+  };
+
+  const handleOpenSubscribePage = () => {
+    if (!isBillingConfigured()) {
+      showAlert(
+        "準備中です",
+        "有料プランの決済ページがまだ設定されていません(アプリ配布者による設定待ちです)。"
+      );
+      return;
+    }
+    if (!settings.google.connected) {
+      showAlert("Googleアカウント連携が必要です", "下の「Googleアカウント連携」からログインしてください。");
+      return;
+    }
+    Linking.openURL(buildSubscribeUrl(settings.google.email));
+  };
+
+  const onSelectThemePreset = (id: ThemePresetId) => {
+    // プリセットを選んだら、管理者の自由配色(customColors)は解除してプリセットを反映させる
+    persist({ ...settings, theme: { presetId: id, customColors: null } });
+  };
+
+  // カラーコードの手入力ではなく、色見本をタップした瞬間に確定・保存する
+  const onPickCustomColor = (field: keyof CustomThemeColors, hex: string) => {
+    const next: CustomThemeColors = {
+      ...(settings.theme.customColors ?? DEFAULT_THEME_COLORS),
+      [field]: hex,
+    };
+    setCustomColorDraft(next);
+    persist({ ...settings, theme: { ...settings.theme, customColors: next } });
+  };
+
+  const handleResetCustomTheme = () => {
+    setCustomColorDraft({ ...DEFAULT_THEME_COLORS });
+    persist({ ...settings, theme: { ...settings.theme, customColors: null } });
+  };
+
+  const onChangeCallUserAs = (v: string) => {
+    update((d) => ({ ...d, persona: { ...d.persona, callUserAs: v } }));
+  };
+  const onBlurCallUserAs = () => persist(settings);
+
+  const testVoice = () => {
+    const isPaidProvider =
+      settings.voice.provider === "voicevox" || settings.voice.provider === "voicevox_local";
+    const voiceToUse =
+      isPaidProvider && !hasPaidAccess(settings.billing)
+        ? { ...settings.voice, provider: "system" as const }
+        : settings.voice;
+    speakText("こんにちは。この声でお話しします。", voiceToUse, {
+      onError: (error) => {
+        const base =
+          settings.voice.provider === "voicevox"
+            ? "VOICEVOXエンジンへの接続、または話者選択を確認してください。"
+            : settings.voice.provider === "google"
+            ? "Google Cloud TTSのAPIキー、または音声選択を確認してください。"
+            : settings.voice.provider === "voicevox_local"
+            ? "内蔵VOICEVOXの声の選択、またはダウンロード状況を確認してください。"
+            : "この端末で利用できる音声が見つかりませんでした。";
+        const detail = describeVoiceError(error);
+        showAlert("再生できませんでした", detail ? `${base}\n\n詳細: ${detail}` : base);
+      },
+    });
+  };
+
+  const handleGoogleConnect = async () => {
+    if (googleAccountConnecting) return;
+    setGoogleAccountConnecting(true);
+    setGoogleAccountError(null);
+    try {
+      const result = await connectGoogleAccount();
+      if (result) {
+        let nextSettings: AppSettings = {
+          ...settings,
+          google: { connected: true, email: result.email, lastSyncedAt: settings.google.lastSyncedAt },
+        };
+        // 接続直後に、そのままこのアカウントでの課金状態も確認しておく
+        // (「利用プラン」欄で改めて「状態を確認」を押させる手間を減らすため)。
+        if (isBillingConfigured() && result.idToken) {
+          try {
+            const billingResult = await checkBillingStatus(result.idToken);
+            nextSettings = {
+              ...nextSettings,
+              billing: {
+                status: billingResult.status,
+                expiresAt: billingResult.expiresAt,
+                lastCheckedAt: Date.now(),
+              },
+            };
+          } catch {
+            // 課金状態の確認に失敗しても、Google連携自体は成功しているので握りつぶす
+            // (「利用プラン」欄で改めて確認できる)。
+          }
+        }
+        await persist(nextSettings);
+        showAlert(
+          "接続しました",
+          "会話ログとAIの記憶を、このGoogleアカウントのドライブ(アプリ専用の非公開領域)に同期します。別の端末で同じアカウントにログインすると引き継げます。有料プランの加入状況も、このアカウント単位で判定されます。"
+        );
+      }
+      // resultがnull(利用者がキャンセル)の場合は何もしない
+    } catch (e) {
+      setGoogleAccountError(
+        e instanceof GoogleAuthError || e instanceof Error
+          ? e.message
+          : "接続に失敗しました。しばらくしてから再度お試しください。"
+      );
+    } finally {
+      setGoogleAccountConnecting(false);
+    }
+  };
+
+  const handleGoogleDisconnect = () => {
+    showConfirm(
+      "Googleアカウント連携を解除しますか？",
+      "この端末との同期が止まります(Googleドライブ上のデータ自体は削除されません)。有料プランに加入中の場合、解除している間は「利用プラン」で状態を確認できなくなります(加入自体は解約されません)。",
+      "解除する",
+      async () => {
+        await disconnectGoogleAccount();
+        await persist({
+          ...settings,
+          google: { connected: false, email: null, lastSyncedAt: null },
+          billing: { status: "unknown", expiresAt: null, lastCheckedAt: null },
+        });
+      },
+      true
+    );
+  };
+
+  const handleClearMemory = () => {
+    showConfirm(
+      "AIの記憶を削除しますか？",
+      "これまでの会話から要約された記憶を削除します(会話ログ自体は削除されません)。",
+      "削除する",
+      () => persist({ ...settings, userMemory: { summary: "", updatedAt: null } }),
+      true
+    );
+  };
+
+  const handleClearHistory = () => {
+    const doClear = async () => {
+      await clearHistory();
+      showAlert("削除しました", "会話履歴を削除しました。");
+    };
+    showConfirm("会話履歴を削除しますか？", "この操作は取り消せません。", "削除する", doClear, true);
+  };
+
+  const activeVoiceList =
+    settings.voice.provider === "voicevox"
+      ? voicevoxSpeakers
+      : settings.voice.provider === "google"
+      ? googleVoices
+      : settings.voice.provider === "voicevox_local"
+      ? []
+      : systemVoices;
+  const activeSelectedId =
+    settings.voice.provider === "voicevox"
+      ? settings.voice.voicevox.speakerId != null
+        ? String(settings.voice.voicevox.speakerId)
+        : null
+      : settings.voice.provider === "google"
+      ? settings.voice.google.voiceName
+      : settings.voice.provider === "voicevox_local"
+      ? null
+      : settings.voice.selectedVoiceId;
+
+  const isAdmin = settings.billing.status === "admin";
+  const isThemeSubscriber = isAdmin || settings.billing.status === "active";
+  const themeColors = resolveThemeColors(settings.theme, settings.billing);
+
+  return (
+    <ScrollView style={styles.container} contentContainerStyle={{ padding: 16, paddingBottom: 60 }}>
+      <Section title="AIの立場（ペルソナ）">
+        <Text style={styles.helper}>
+          AIにどんな立場・距離感で話してほしいかを選べます。
+        </Text>
+        <View style={styles.chipWrap}>
+          {PERSONA_PRESETS.map((p) => (
+            <Pressable
+              key={p.id}
+              onPress={() => onSelectPersona(p.id)}
+              style={[styles.chip, settings.persona.presetId === p.id && styles.chipActive]}
+            >
+              <Text
+                style={[
+                  styles.chipText,
+                  settings.persona.presetId === p.id && styles.chipTextActive,
+                ]}
+              >
+                {p.label}
+              </Text>
+            </Pressable>
+          ))}
+        </View>
+        <Text style={styles.presetDesc}>
+          {PERSONA_PRESETS.find((p) => p.id === settings.persona.presetId)?.description}
+        </Text>
+
+        <Text style={styles.label}>
+          {settings.persona.presetId === "custom"
+            ? "AIの立場を自由に記述してください"
+            : "追加の希望（任意）"}
+        </Text>
+        <TextInput
+          style={styles.multiline}
+          value={customPersonaText}
+          onChangeText={setCustomPersonaText}
+          onBlur={onBlurCustomDescription}
+          multiline
+          placeholder={
+            settings.persona.presetId === "custom"
+              ? "例: 昔からの幼なじみのように、たまに敬語が抜けるくらい気を許した感じで話してほしい"
+              : "例: 敬語よりタメ口寄りにしてほしい、など"
+          }
+        />
+
+        <Text style={styles.label}>AIに呼んでほしい呼び方</Text>
+        <TextInput
+          style={styles.input}
+          value={settings.persona.callUserAs}
+          onChangeText={onChangeCallUserAs}
+          onBlur={onBlurCallUserAs}
+          placeholder="例: あなた / ○○さん / ニックネーム"
+        />
+
+        <Text style={styles.label}>話し方のトーン</Text>
+        <View style={styles.chipWrap}>
+          {(
+            [
+              { id: "gentle", label: "やわらか" },
+              { id: "casual", label: "カジュアル" },
+              { id: "polite", label: "丁寧" },
+            ] as const
+          ).map((t) => (
+            <Pressable
+              key={t.id}
+              onPress={() =>
+                persist({ ...settings, persona: { ...settings.persona, tone: t.id } })
+              }
+              style={[styles.chip, settings.persona.tone === t.id && styles.chipActive]}
+            >
+              <Text
+                style={[
+                  styles.chipText,
+                  settings.persona.tone === t.id && styles.chipTextActive,
+                ]}
+              >
+                {t.label}
+              </Text>
+            </Pressable>
+          ))}
+        </View>
+      </Section>
+
+      <Section title="音声（読み上げ）">
+        <View style={styles.row}>
+          <Text style={styles.helper}>AIの返答を自動で読み上げる</Text>
+          <Switch value={settings.voice.autoSpeak} onValueChange={onToggleAutoSpeak} />
+        </View>
+        <Text style={styles.smallHelper}>
+          オフの場合でも、音声で話しかけたときはその返答だけ自動で読み上げます。テキスト返答は吹き出しの🔊から個別に再生できます。
+        </Text>
+
+        <Text style={styles.label}>音源</Text>
+        <View style={styles.chipWrap}>
+          <Pressable
+            onPress={() => onSelectTtsProvider("system")}
+            style={[styles.chip, settings.voice.provider === "system" && styles.chipActive]}
+          >
+            <Text
+              style={[
+                styles.chipText,
+                settings.voice.provider === "system" && styles.chipTextActive,
+              ]}
+            >
+              端末/ブラウザ内蔵ボイス
+            </Text>
+          </Pressable>
+          <Pressable
+            onPress={() => onSelectTtsProvider("voicevox")}
+            style={[styles.chip, settings.voice.provider === "voicevox" && styles.chipActive]}
+          >
+            <Text
+              style={[
+                styles.chipText,
+                settings.voice.provider === "voicevox" && styles.chipTextActive,
+              ]}
+            >
+              VOICEVOX（キャラクターボイス）
+            </Text>
+          </Pressable>
+          <Pressable
+            onPress={() => onSelectTtsProvider("google")}
+            style={[styles.chip, settings.voice.provider === "google" && styles.chipActive]}
+          >
+            <Text
+              style={[
+                styles.chipText,
+                settings.voice.provider === "google" && styles.chipTextActive,
+              ]}
+            >
+              Google Cloud TTS（自分のAPIキー）
+            </Text>
+          </Pressable>
+          {isLocalVoicevoxSupported() ? (
+            <Pressable
+              onPress={() => onSelectTtsProvider("voicevox_local")}
+              style={[
+                styles.chip,
+                settings.voice.provider === "voicevox_local" && styles.chipActive,
+              ]}
+            >
+              <Text
+                style={[
+                  styles.chipText,
+                  settings.voice.provider === "voicevox_local" && styles.chipTextActive,
+                ]}
+              >
+                VOICEVOX（内蔵・Android限定）
+              </Text>
+            </Pressable>
+          ) : null}
+        </View>
+
+        {settings.voice.provider === "voicevox" ? (
+          <>
+            {!hasPaidAccess(settings.billing) ? (
+              <Text style={styles.errorHelper}>
+                VOICEVOXは有料プランの方のみご利用いただけます。下の「利用プラン」から加入してください(有効になるまでは端末内蔵ボイスで読み上げられます)。
+              </Text>
+            ) : null}
+            <Text style={styles.smallHelper}>
+              {isSharedVoicevoxConfigured()
+                ? "有料プランの方(管理者含む)は、運営が用意した共有VOICEVOXサーバーに自動的に接続されます。自分専用のVOICEVOXサーバーを使いたい場合のみ、下のURLを書き換えてください。"
+                : "無料・オープンソースのVOICEVOX ENGINEを自分でホスティングし、そのURLを入力してください。スリープなしで場所を問わず使うための推奨構成(クラウドの無料VM + HTTPS化)はREADMEを参照してください。"}
+            </Text>
+            <Text style={styles.label}>VOICEVOX ENGINE の URL</Text>
+            <TextInput
+              style={styles.input}
+              value={voicevoxUrlDraft}
+              onChangeText={setVoicevoxUrlDraft}
+              autoCapitalize="none"
+              placeholder="例: https://yourname.duckdns.org"
+            />
+            <Pressable
+              style={styles.testButton}
+              onPress={() => fetchVoicevoxSpeakers(voicevoxUrlDraft, true)}
+              disabled={voicevoxLoading}
+            >
+              {voicevoxLoading ? (
+                <ActivityIndicator size="small" color="#2F5BD9" />
+              ) : (
+                <Text style={styles.testButtonText}>接続して話者一覧を取得</Text>
+              )}
+            </Pressable>
+            {voicevoxError ? <Text style={styles.errorHelper}>{voicevoxError}</Text> : null}
+          </>
+        ) : null}
+
+        {settings.voice.provider === "google" ? (
+          <>
+            <Text style={styles.smallHelper}>
+              サーバーのホスティングは不要です。ご自身のGoogle Cloudアカウントで発行したAPIキーを入力してください。無料枠が大きいため、個人利用なら通常は課金されません(手順はREADME参照)。APIキーはこの端末にのみ保存され、外部には送信されません。
+            </Text>
+            <Pressable style={styles.secondaryButton} onPress={handleOpenGoogleTtsSetupPage}>
+              <Text style={styles.secondaryButtonText}>🌐 Text-to-Speech APIを有効化する</Text>
+            </Pressable>
+            <Text style={styles.smallHelper}>
+              初めての場合はプロジェクト作成→API有効化→「認証情報」からAPIキーを作成、という順番になります。詳しい手順はREADMEをご覧ください。
+            </Text>
+
+            <View style={styles.row}>
+              <Text style={styles.label}>APIキー</Text>
+              <Pressable onPress={handlePasteGoogleApiKey}>
+                <Text style={styles.linkText}>📋 クリップボードから貼り付け</Text>
+              </Pressable>
+            </View>
+            <TextInput
+              style={styles.input}
+              value={googleApiKeyDraft}
+              onChangeText={setGoogleApiKeyDraft}
+              secureTextEntry
+              autoCapitalize="none"
+              placeholder="AIza... など"
+            />
+            <Pressable
+              style={styles.testButton}
+              onPress={() => fetchGoogleVoices(googleApiKeyDraft, true)}
+              disabled={googleLoading}
+            >
+              {googleLoading ? (
+                <ActivityIndicator size="small" color="#2F5BD9" />
+              ) : (
+                <Text style={styles.testButtonText}>接続して音声一覧を取得</Text>
+              )}
+            </Pressable>
+            {googleError ? <Text style={styles.errorHelper}>{googleError}</Text> : null}
+          </>
+        ) : null}
+
+        {settings.voice.provider === "voicevox_local" ? (
+          <>
+            {!hasPaidAccess(settings.billing) ? (
+              <Text style={styles.errorHelper}>
+                内蔵VOICEVOXは有料プランの方のみご利用いただけます。下の「利用プラン」から加入してください(有効になるまでは端末内蔵ボイスで読み上げられます)。
+              </Text>
+            ) : null}
+            <Text style={styles.smallHelper}>
+              サーバーに接続せず、この端末に声のデータをダウンロードして直接読み上げます(実験的機能)。タップした声のデータが未ダウンロードの場合、自動的にダウンロードしてから選択されます。ダウンロードにはVOICEVOXの利用規約への同意が前提となり、各声のクレジット表記が必要です(README参照)。
+            </Text>
+            {localVoicevoxError ? <Text style={styles.errorHelper}>{localVoicevoxError}</Text> : null}
+            {downloadingVvmFile ? (
+              <View style={styles.row}>
+                <ActivityIndicator size="small" color="#2F5BD9" />
+                <Text style={styles.smallHelper}>
+                  {`ダウンロード中… ${downloadProgress != null ? Math.round(downloadProgress * 100) + "%" : ""}`}
+                </Text>
+              </View>
+            ) : null}
+
+            <Text style={styles.label}>声を選ぶ（タップで選択、未ダウンロードなら自動取得）</Text>
+            <Text style={styles.smallHelper}>
+              話者(キャラクター)ごとにまとめています。名前をタップすると、その話者のスタイル一覧が開きます。
+            </Text>
+            <TextInput
+              style={styles.input}
+              value={localVoicevoxFilterText}
+              onChangeText={setLocalVoicevoxFilterText}
+              placeholder="話者名・スタイル名で検索（例: ずんだもん）"
+            />
+            {(() => {
+              const filterLower = localVoicevoxFilterText.trim().toLowerCase();
+              const filteredGroups = filterLower
+                ? LOCAL_VOICEVOX_SPEAKER_GROUPS.filter(
+                    (g) =>
+                      g.speakerName.toLowerCase().includes(filterLower) ||
+                      g.styles.some((s) => s.styleName.toLowerCase().includes(filterLower))
+                  )
+                : LOCAL_VOICEVOX_SPEAKER_GROUPS;
+              if (filteredGroups.length === 0) {
+                return (
+                  <Text style={styles.smallHelper}>「{localVoicevoxFilterText}」に一致する話者が見つかりませんでした。</Text>
+                );
+              }
+              return filteredGroups.map((group) => {
+                // 検索で絞り込んでいる間は、探している話者をすぐ見られるよう自動的に展開する
+                const isExpanded = filterLower.length > 0 || expandedLocalVoicevoxSpeakers.has(group.speakerName);
+                const downloadedCount = group.styles.filter((s) =>
+                  downloadedVvmFiles.includes(s.vvmFile)
+                ).length;
+                const hasSelected = group.styles.some(
+                  (s) => s.styleId === settings.voice.localVoicevox.selectedStyleId
+                );
+                return (
+                  <View key={group.speakerName} style={styles.speakerGroup}>
+                    <Pressable
+                      onPress={() => toggleLocalVoicevoxSpeakerExpanded(group.speakerName)}
+                      style={[styles.speakerHeader, hasSelected && styles.speakerHeaderActive]}
+                    >
+                      <Text
+                        style={[styles.speakerHeaderText, hasSelected && styles.speakerHeaderTextActive]}
+                      >
+                        {isExpanded ? "▾" : "▸"} {group.speakerName}
+                        {downloadedCount > 0
+                          ? `　DL済み ${downloadedCount}/${group.styles.length}`
+                          : `　${group.styles.length}種類`}
+                      </Text>
+                    </Pressable>
+                    {isExpanded ? (
+                      <View style={styles.chipWrap}>
+                        {group.styles.map((style) => {
+                          const selected =
+                            settings.voice.localVoicevox.selectedStyleId === style.styleId;
+                          const downloaded = downloadedVvmFiles.includes(style.vvmFile);
+                          return (
+                            <Pressable
+                              key={style.styleId}
+                              onPress={() =>
+                                handleSelectLocalVoicevoxStyle(style.vvmFile, style.styleId)
+                              }
+                              disabled={downloadingVvmFile != null}
+                              style={[styles.chip, selected && styles.chipActive]}
+                            >
+                              <Text style={[styles.chipText, selected && styles.chipTextActive]}>
+                                {downloaded ? "✓ " : "⬇ "}
+                                {style.styleName}
+                              </Text>
+                            </Pressable>
+                          );
+                        })}
+                      </View>
+                    ) : null}
+                  </View>
+                );
+              });
+            })()}
+
+            {downloadedVvmFiles.length > 0 ? (
+              <>
+                <Text style={styles.label}>ダウンロード済みデータの管理</Text>
+                <View style={styles.chipWrap}>
+                  {downloadedVvmFiles.map((vvmFileName) => (
+                    <Pressable
+                      key={vvmFileName}
+                      onPress={() => handleDeleteLocalVvm(vvmFileName)}
+                      style={styles.chip}
+                    >
+                      <Text style={styles.chipText}>🗑 {vvmFileName} を削除</Text>
+                    </Pressable>
+                  ))}
+                </View>
+              </>
+            ) : null}
+          </>
+        ) : null}
+
+        {settings.voice.provider === "voicevox_local" ? null : (
+          <>
+            <Text style={styles.label}>
+              {settings.voice.provider === "voicevox"
+                ? `話者（${activeVoiceList.length}種類）`
+                : settings.voice.provider === "google"
+                ? `音声（${activeVoiceList.length}種類から選択）`
+                : `読み上げボイス（${activeVoiceList.length}種類から選択）`}
+            </Text>
+            {activeVoiceList.length === 0 ? (
+              <Text style={styles.smallHelper}>
+                {settings.voice.provider === "voicevox"
+                  ? "まだ話者を取得していません。上のURLを入力して「接続して話者一覧を取得」を押してください。"
+                  : settings.voice.provider === "google"
+                  ? "まだ音声を取得していません。上にAPIキーを入力して「接続して音声一覧を取得」を押してください。"
+                  : "利用可能な音声を検出できませんでした。端末/ブラウザの音声合成設定をご確認ください。"}
+              </Text>
+            ) : (
+              (() => {
+                // スクロールが長くなりすぎないよう、検索で絞り込めるようにし、
+                // 絞り込んでいない状態では表示件数をいったん制限する。
+                const VOICE_LIST_CAP = 24;
+                const filterLower = voiceFilterText.trim().toLowerCase();
+                const filtered = filterLower
+                  ? activeVoiceList.filter((v) => v.label.toLowerCase().includes(filterLower))
+                  : activeVoiceList;
+                const visible =
+                  !filterLower && !showAllVoices ? filtered.slice(0, VOICE_LIST_CAP) : filtered;
+                const hiddenCount = filtered.length - visible.length;
+                return (
+                  <>
+                    {activeVoiceList.length > VOICE_LIST_CAP ? (
+                      <TextInput
+                        style={styles.input}
+                        value={voiceFilterText}
+                        onChangeText={setVoiceFilterText}
+                        placeholder="名前で検索"
+                      />
+                    ) : null}
+                    {filtered.length === 0 ? (
+                      <Text style={styles.smallHelper}>
+                        「{voiceFilterText}」に一致する音声が見つかりませんでした。
+                      </Text>
+                    ) : (
+                      <View style={styles.chipWrap}>
+                        {visible.map((v) => (
+                          <Pressable
+                            key={v.id}
+                            onPress={() =>
+                              settings.voice.provider === "voicevox"
+                                ? onSelectVoicevoxSpeaker(v.id)
+                                : settings.voice.provider === "google"
+                                ? onSelectGoogleVoice(v.id)
+                                : onSelectSystemVoice(v.id)
+                            }
+                            style={[styles.chip, activeSelectedId === v.id && styles.chipActive]}
+                          >
+                            <Text
+                              style={[
+                                styles.chipText,
+                                activeSelectedId === v.id && styles.chipTextActive,
+                              ]}
+                            >
+                              {v.label}
+                            </Text>
+                          </Pressable>
+                        ))}
+                      </View>
+                    )}
+                    {hiddenCount > 0 ? (
+                      <Pressable onPress={() => setShowAllVoices(true)} style={{ marginTop: 8 }}>
+                        <Text style={styles.linkText}>他{hiddenCount}件をすべて表示</Text>
+                      </Pressable>
+                    ) : null}
+                  </>
+                );
+              })()
+            )}
+          </>
+        )}
+
+        <Pressable style={styles.testButton} onPress={testVoice}>
+          <Text style={styles.testButtonText}>▶ この声を試聴する</Text>
+        </Pressable>
+
+        <View style={styles.stepperRow}>
+          <Text style={styles.label}>速さ: {settings.voice.rate.toFixed(2)}</Text>
+          <View style={styles.stepperButtons}>
+            <StepperBtn label="－" onPress={() => adjustRate(-0.1)} />
+            <StepperBtn label="＋" onPress={() => adjustRate(0.1)} />
+          </View>
+        </View>
+        <View style={styles.stepperRow}>
+          <Text style={styles.label}>高さ: {settings.voice.pitch.toFixed(2)}</Text>
+          <View style={styles.stepperButtons}>
+            <StepperBtn label="－" onPress={() => adjustPitch(-0.1)} />
+            <StepperBtn label="＋" onPress={() => adjustPitch(0.1)} />
+          </View>
+        </View>
+      </Section>
+
+      <Section title="利用プラン">
+        <Text style={styles.helper}>
+          「備え付けのAI」(共有プロキシ経由の対話AI)とVOICEVOX(サーバー方式・内蔵方式どちらも)は、有料プランへの加入が必要な機能です。「自分のAPIキーを使う」モードと端末/ブラウザ内蔵ボイスは、プラン状態に関わらず無料でお使いいただけます。
+        </Text>
+        <Text style={styles.smallHelper}>
+          加入状況の確認には、下の「Googleアカウント連携」でのログインが必要です(このGoogleアカウントのメールアドレス単位で、有料プラン・管理者を判定します)。
+        </Text>
+
+        <View style={styles.planBadge}>
+          <Text style={styles.planBadgeText}>
+            現在のプラン:{" "}
+            {settings.billing.status === "admin"
+              ? "管理者(全機能開放)"
+              : settings.billing.status === "active"
+              ? "有料プラン加入中"
+              : settings.billing.status === "checking"
+              ? "確認中…"
+              : "未加入"}
+          </Text>
+        </View>
+
+        {!isBillingConfigured() ? (
+          <Text style={styles.errorHelper}>
+            決済ページが未設定です(アプリ配布者による設定待ちです)。設定が完了するまでは有料機能はご利用いただけません。
+          </Text>
+        ) : !settings.google.connected ? (
+          <Text style={styles.errorHelper}>
+            まだGoogleアカウントと連携していません。下の「Googleアカウント連携」セクションからログインしてから、こちらの「状態を確認」・「加入ページを開く」をお使いください。
+          </Text>
+        ) : (
+          <Text style={styles.okHelper}>✓ {settings.google.email ?? "Googleアカウント"} で判定します</Text>
+        )}
+
+        <View style={styles.chipWrap}>
+          <Pressable
+            style={[styles.primaryButton, !settings.google.connected && styles.primaryButtonDisabled]}
+            onPress={handleOpenSubscribePage}
+            disabled={!settings.google.connected}
+          >
+            <Text style={styles.primaryButtonText}>💳 加入ページを開く</Text>
+          </Pressable>
+        </View>
+        <Pressable
+          style={[
+            styles.secondaryButton,
+            (billingChecking || !settings.google.connected) && styles.primaryButtonDisabled,
+          ]}
+          onPress={handleCheckBillingStatus}
+          disabled={billingChecking || !settings.google.connected}
+        >
+          {billingChecking ? (
+            <ActivityIndicator size="small" color="#2F5BD9" />
+          ) : (
+            <Text style={styles.secondaryButtonText}>🔄 状態を確認</Text>
+          )}
+        </Pressable>
+      </Section>
+
+      <Section title="カラーテーマ">
+        {isAdmin ? (
+          <>
+            <Text style={styles.helper}>
+              管理者は配色を自由に指定できます。色見本をタップするとすぐに反映されます(カラーコードの入力は不要です)。ここで設定した配色は、サブスクの方が選ぶプリセットより優先されます。
+            </Text>
+
+            <Text style={styles.label}>ベースカラー</Text>
+            <ColorSwatchPicker
+              value={customColorDraft.baseColor}
+              onChange={(hex) => onPickCustomColor("baseColor", hex)}
+              swatches={COLOR_SWATCHES}
+            />
+            <Text style={[styles.label, { marginTop: 14 }]}>ボタンカラー</Text>
+            <ColorSwatchPicker
+              value={customColorDraft.buttonColor}
+              onChange={(hex) => onPickCustomColor("buttonColor", hex)}
+              swatches={COLOR_SWATCHES}
+            />
+            <Text style={[styles.label, { marginTop: 14 }]}>テキストカラー</Text>
+            <ColorSwatchPicker
+              value={customColorDraft.textColor}
+              onChange={(hex) => onPickCustomColor("textColor", hex)}
+              swatches={COLOR_SWATCHES}
+            />
+
+            <View style={styles.themePreviewRow}>
+              <View style={[styles.themeSwatch, { backgroundColor: themeColors.baseColor }]} />
+              <View style={[styles.themeSwatch, { backgroundColor: themeColors.buttonColor }]} />
+              <View style={[styles.themeSwatch, { backgroundColor: themeColors.textColor }]} />
+              <Text style={styles.smallHelper}>← 現在の配色(ベース/ボタン/テキスト)</Text>
+            </View>
+
+            {settings.theme.customColors ? (
+              <Pressable onPress={handleResetCustomTheme}>
+                <Text style={styles.linkText}>自由設定をやめてプリセットに戻す</Text>
+              </Pressable>
+            ) : null}
+
+            <Text style={[styles.label, { marginTop: 14 }]}>プリセットから選ぶ(自由設定は解除されます)</Text>
+          </>
+        ) : !isThemeSubscriber ? (
+          <Text style={styles.errorHelper}>
+            カラーテーマの変更は有料プランの方のみご利用いただけます。上の「利用プラン」から加入してください(未加入の間は標準の配色になります)。
+          </Text>
+        ) : (
+          <Text style={styles.smallHelper}>お好みの配色をプリセットから選べます。</Text>
+        )}
+
+        {isThemeSubscriber ? (
+          <View style={styles.chipWrap}>
+            {THEME_PRESET_LIST.map((preset) => (
+              <Pressable
+                key={preset.id}
+                onPress={() => onSelectThemePreset(preset.id)}
+                style={[
+                  styles.themePresetChip,
+                  !settings.theme.customColors &&
+                    settings.theme.presetId === preset.id &&
+                    styles.chipActive,
+                ]}
+              >
+                <View style={[styles.themeSwatch, styles.themeSwatchSmall, { backgroundColor: preset.buttonColor }]} />
+                <Text
+                  style={[
+                    styles.chipText,
+                    !settings.theme.customColors &&
+                      settings.theme.presetId === preset.id &&
+                      styles.chipTextActive,
+                  ]}
+                >
+                  {preset.label}
+                </Text>
+              </Pressable>
+            ))}
+          </View>
+        ) : null}
+      </Section>
+
+      <Section title="対話AIの接続設定">
+        <Text style={styles.helper}>
+          返答はストリーミング表示され、生成され次第すぐに読めます。
+        </Text>
+        <View style={styles.chipWrap}>
+          <Pressable
+            onPress={() => onSelectAiMode("proxy")}
+            style={[styles.chip, settings.ai.mode === "proxy" && styles.chipActive]}
+          >
+            <Text style={[styles.chipText, settings.ai.mode === "proxy" && styles.chipTextActive]}>
+              共有プロキシを使う（設定不要）
+            </Text>
+          </Pressable>
+          <Pressable
+            onPress={() => onSelectAiMode("custom")}
+            style={[styles.chip, settings.ai.mode === "custom" && styles.chipActive]}
+          >
+            <Text style={[styles.chipText, settings.ai.mode === "custom" && styles.chipTextActive]}>
+              自分のAPIキーを使う
+            </Text>
+          </Pressable>
+        </View>
+
+        {settings.ai.mode === "proxy" ? (
+          <>
+            <Text style={styles.smallHelper}>
+              アプリ配布者が用意した共有の中継サーバーを使うため、APIキーの発行・入力は不要です。多くの人が同時に使うと混み合う場合があるので、その際は「自分のAPIキーを使う」に切り替えてください。
+            </Text>
+            {!isSharedProxyConfigured() ? (
+              <Text style={styles.errorHelper}>
+                共有プロキシが未設定です(アプリ配布者による設定待ちです)。設定が完了するまでは「自分のAPIキーを使う」をご利用ください。
+              </Text>
+            ) : !hasPaidAccess(settings.billing) ? (
+              <Text style={styles.errorHelper}>
+                備え付けのAIは有料プランの方のみご利用いただけます。上の「利用プラン」から加入してください。
+              </Text>
+            ) : null}
+
+            <Text style={styles.label}>速度/精度</Text>
+            <View style={styles.chipWrap}>
+              {PROXY_MODEL_PRESETS.map((p) => (
+                <Pressable
+                  key={p.label}
+                  onPress={() => applyProxyModelPreset(p)}
+                  style={[styles.chip, settings.ai.model === p.model && styles.chipActive]}
+                >
+                  <Text
+                    style={[styles.chipText, settings.ai.model === p.model && styles.chipTextActive]}
+                  >
+                    {p.label}
+                  </Text>
+                </Pressable>
+              ))}
+            </View>
+            <Text style={styles.smallHelper}>
+              {PROXY_MODEL_PRESETS.find((p) => p.model === settings.ai.model)?.note}
+            </Text>
+          </>
+        ) : (
+          <>
+            <Text style={styles.smallHelper}>
+              無料で使えるOpenAI互換APIのプロバイダを選び、発行したAPIキーを入力してください。APIキーはこの端末にのみ保存され、外部には送信されません。
+            </Text>
+
+            <View style={styles.quickSetupBox}>
+              <Text style={styles.quickSetupTitle}>かんたん接続</Text>
+              <Pressable
+                style={[styles.primaryButton, openRouterConnecting && styles.primaryButtonDisabled]}
+                onPress={handleOpenRouterConnect}
+                disabled={openRouterConnecting}
+              >
+                {openRouterConnecting ? (
+                  <ActivityIndicator size="small" color="#fff" />
+                ) : (
+                  <Text style={styles.primaryButtonText}>🔗 OpenRouterでログインして接続</Text>
+                )}
+              </Pressable>
+              <Text style={styles.smallHelper}>
+                ボタンを押すとブラウザでOpenRouterのログイン画面が開きます。ログイン(未登録の場合は新規登録)して許可するだけで、APIキーの発行・コピー・貼り付けなしにこの端末へ自動設定されます。
+              </Text>
+
+              <Pressable style={styles.secondaryButton} onPress={handleOpenGroqKeysPage}>
+                <Text style={styles.secondaryButtonText}>🌐 Groqのキー作成ページを開く</Text>
+              </Pressable>
+              <Text style={styles.smallHelper}>
+                Groqには自動接続の仕組みが無いため、開いたページでキーを発行してコピーし、下の「クリップボードから貼り付け」で設定してください。
+              </Text>
+            </View>
+
+            <View style={styles.chipWrap}>
+              {CUSTOM_AI_PROVIDER_PRESETS.map((p) => (
+                <Pressable
+                  key={p.label}
+                  onPress={() => applyProviderPreset(p)}
+                  style={[
+                    styles.chip,
+                    settings.ai.providerLabel === p.label && styles.chipActive,
+                  ]}
+                >
+                  <Text
+                    style={[
+                      styles.chipText,
+                      settings.ai.providerLabel === p.label && styles.chipTextActive,
+                    ]}
+                  >
+                    {p.label}
+                  </Text>
+                </Pressable>
+              ))}
+            </View>
+            <Text style={styles.smallHelper}>
+              {CUSTOM_AI_PROVIDER_PRESETS.find((p) => p.label === settings.ai.providerLabel)?.note}
+            </Text>
+            <Pressable onPress={() => Linking.openURL(GROQ_MODELS_DOC_URL)}>
+              <Text style={styles.linkText}>
+                最新のモデル一覧はこちら({GROQ_MODELS_DOC_URL})
+              </Text>
+            </Pressable>
+
+            <Text style={styles.label}>モデル名</Text>
+            <TextInput
+              style={styles.input}
+              value={settings.ai.model}
+              onChangeText={onChangeModel}
+              onBlur={onBlurModel}
+              autoCapitalize="none"
+            />
+
+            <View style={styles.row}>
+              <Text style={styles.label}>APIキー</Text>
+              <Pressable onPress={handlePasteApiKey}>
+                <Text style={styles.linkText}>📋 クリップボードから貼り付け</Text>
+              </Pressable>
+            </View>
+            <TextInput
+              style={styles.input}
+              value={settings.ai.apiKey}
+              onChangeText={onChangeApiKey}
+              onBlur={onBlurApiKey}
+              secureTextEntry
+              autoCapitalize="none"
+              placeholder="gsk_... または sk-or-... など"
+            />
+            {settings.ai.apiKey ? (
+              <Text style={styles.okHelper}>✓ APIキーが設定されています</Text>
+            ) : null}
+          </>
+        )}
+      </Section>
+
+      <Section title="Googleアカウント連携(履歴・AIの記憶を引き継ぐ)">
+        <Text style={styles.smallHelper}>
+          Googleアカウントでログインすると、会話ログとAIが要約した記憶(呼び方や最近の話題など)を、そのアカウント自身のGoogleドライブ(このアプリ専用の非公開領域=通常のドライブ画面には表示されません)に保存します。別の端末で同じGoogleアカウントにログインすると、そこから会話を続けられます。開発者のサーバーには一切送信・保存されません。有料プラン(上の「利用プラン」)の加入状況も、このGoogleアカウントのメールアドレス単位で判定されるため、有料機能を使うにはここでの連携が必須です。
+        </Text>
+
+        {!isGoogleSyncConfigured() ? (
+          <Text style={styles.smallHelper}>Google連携は未設定です(アプリ配布者による設定待ちです)。</Text>
+        ) : settings.google.connected ? (
+          <>
+            <Text style={styles.okHelper}>
+              ✓ {settings.google.email ?? "Googleアカウント"} に接続中
+            </Text>
+            <Text style={styles.smallHelper}>
+              {settings.google.lastSyncedAt
+                ? `最終同期: ${new Date(settings.google.lastSyncedAt).toLocaleString("ja-JP")}`
+                : "まだ同期していません(会話を送信すると自動的に同期されます)"}
+            </Text>
+            <Pressable style={styles.dangerButton} onPress={handleGoogleDisconnect}>
+              <Text style={styles.dangerButtonText}>連携を解除する</Text>
+            </Pressable>
+          </>
+        ) : (
+          <Pressable
+            style={[styles.primaryButton, googleAccountConnecting && styles.primaryButtonDisabled]}
+            onPress={handleGoogleConnect}
+            disabled={googleAccountConnecting}
+          >
+            {googleAccountConnecting ? (
+              <ActivityIndicator size="small" color="#fff" />
+            ) : (
+              <Text style={styles.primaryButtonText}>🔗 Googleでログインして連携する</Text>
+            )}
+          </Pressable>
+        )}
+        {googleAccountError ? <Text style={styles.errorHelper}>{googleAccountError}</Text> : null}
+
+        {settings.userMemory.summary ? (
+          <View style={styles.quickSetupBox}>
+            <Text style={styles.quickSetupTitle}>AIが覚えていること</Text>
+            <Text style={styles.smallHelper}>{settings.userMemory.summary}</Text>
+            <Pressable style={styles.secondaryButton} onPress={handleClearMemory}>
+              <Text style={styles.secondaryButtonText}>この記憶を削除する</Text>
+            </Pressable>
+          </View>
+        ) : null}
+      </Section>
+
+      <Section title="データ">
+        <Pressable style={styles.dangerButton} onPress={handleClearHistory}>
+          <Text style={styles.dangerButtonText}>会話履歴を削除する</Text>
+        </Pressable>
+      </Section>
+
+      <Pressable
+        style={styles.backButton}
+        onPress={() => (router.canGoBack() ? router.back() : router.replace("/"))}
+      >
+        <Text style={styles.backButtonText}>チャットに戻る</Text>
+      </Pressable>
+    </ScrollView>
+  );
+}
+
+function Section({ title, children }: { title: string; children: React.ReactNode }) {
+  return (
+    <View style={styles.section}>
+      <Text style={styles.sectionTitle}>{title}</Text>
+      {children}
+    </View>
+  );
+}
+
+function StepperBtn({ label, onPress }: { label: string; onPress: () => void }) {
+  return (
+    <Pressable style={styles.stepperBtn} onPress={onPress}>
+      <Text style={styles.stepperBtnText}>{label}</Text>
+    </Pressable>
+  );
+}
+
+function clamp(v: number, min: number, max: number) {
+  return Math.min(max, Math.max(min, Math.round(v * 100) / 100));
+}
+
+const styles = StyleSheet.create({
+  container: { flex: 1, backgroundColor: "#fff" },
+  section: {
+    marginBottom: 24,
+    padding: 14,
+    borderRadius: 14,
+    backgroundColor: "#F8F9FC",
+  },
+  sectionTitle: { fontSize: 15, fontWeight: "700", marginBottom: 10, color: "#26263A" },
+  helper: { fontSize: 13, color: "#5A5A70", marginBottom: 8, flexShrink: 1 },
+  smallHelper: { fontSize: 11, color: "#8A8AA0", marginBottom: 10, lineHeight: 15 },
+  errorHelper: { fontSize: 11, color: "#B3261E", marginBottom: 10, lineHeight: 15 },
+  okHelper: { fontSize: 11, color: "#2F8F5B", marginTop: -4, marginBottom: 10 },
+  planBadge: {
+    alignSelf: "flex-start",
+    backgroundColor: "#EDEEF5",
+    borderRadius: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    marginBottom: 10,
+  },
+  planBadgeText: { fontSize: 12, fontWeight: "700", color: "#26263A" },
+  quickSetupBox: {
+    borderWidth: 1,
+    borderColor: "#DCE4FF",
+    borderRadius: 12,
+    padding: 12,
+    marginBottom: 14,
+    backgroundColor: "#F3F6FF",
+    gap: 4,
+  },
+  quickSetupTitle: { fontSize: 13, fontWeight: "700", color: "#26263A", marginBottom: 4 },
+  primaryButton: {
+    backgroundColor: "#4A7DFF",
+    paddingVertical: 11,
+    borderRadius: 10,
+    alignItems: "center",
+    marginTop: 4,
+  },
+  primaryButtonDisabled: { opacity: 0.6 },
+  primaryButtonText: { color: "#fff", fontWeight: "700", fontSize: 13 },
+  secondaryButton: {
+    backgroundColor: "#fff",
+    borderWidth: 1,
+    borderColor: "#C7D2FE",
+    paddingVertical: 10,
+    borderRadius: 10,
+    alignItems: "center",
+    marginTop: 10,
+  },
+  secondaryButtonText: { color: "#2F5BD9", fontWeight: "600", fontSize: 13 },
+  presetDesc: { fontSize: 12, color: "#8A8AA0", marginBottom: 10 },
+  label: { fontSize: 12, fontWeight: "600", color: "#4A4A60", marginTop: 8, marginBottom: 6 },
+  linkText: { fontSize: 11, color: "#2F5BD9", marginBottom: 6 },
+  input: {
+    borderWidth: 1,
+    borderColor: "#DADAE6",
+    borderRadius: 10,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    fontSize: 14,
+    backgroundColor: "#fff",
+  },
+  multiline: {
+    borderWidth: 1,
+    borderColor: "#DADAE6",
+    borderRadius: 10,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    fontSize: 14,
+    minHeight: 60,
+    backgroundColor: "#fff",
+    textAlignVertical: "top",
+  },
+  chipWrap: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
+  chip: {
+    paddingHorizontal: 12,
+    paddingVertical: 7,
+    borderRadius: 16,
+    backgroundColor: "#EDEEF5",
+  },
+  themePreviewRow: { flexDirection: "row", alignItems: "center", gap: 6, marginBottom: 10 },
+  themeSwatch: {
+    width: 28,
+    height: 28,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: "#DADAE6",
+  },
+  themeSwatchSmall: { width: 16, height: 16, borderRadius: 5 },
+  themePresetChip: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    paddingHorizontal: 12,
+    paddingVertical: 7,
+    borderRadius: 16,
+    backgroundColor: "#EDEEF5",
+  },
+  speakerGroup: { marginBottom: 8 },
+  speakerHeader: {
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 10,
+    backgroundColor: "#EDEEF5",
+    marginBottom: 6,
+    alignSelf: "flex-start",
+  },
+  speakerHeaderActive: { backgroundColor: "#DCE4FF" },
+  speakerHeaderText: { fontSize: 12, fontWeight: "600", color: "#4A4A60" },
+  speakerHeaderTextActive: { color: "#2F5BD9" },
+  chipActive: { backgroundColor: "#4A7DFF" },
+  chipText: { fontSize: 12, color: "#4A4A60" },
+  chipTextActive: { color: "#fff", fontWeight: "600" },
+  row: { flexDirection: "row", alignItems: "center", justifyContent: "space-between" },
+  testButton: {
+    marginTop: 12,
+    alignSelf: "flex-start",
+    backgroundColor: "#E4EBFF",
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    borderRadius: 10,
+  },
+  testButtonText: { color: "#2F5BD9", fontWeight: "600", fontSize: 12 },
+  stepperRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    marginTop: 10,
+  },
+  stepperButtons: { flexDirection: "row", gap: 8 },
+  stepperBtn: {
+    width: 32,
+    height: 32,
+    borderRadius: 8,
+    backgroundColor: "#EDEEF5",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  stepperBtnText: { fontSize: 16, fontWeight: "700", color: "#4A4A60" },
+  dangerButton: {
+    backgroundColor: "#FFE9E9",
+    paddingVertical: 10,
+    borderRadius: 10,
+    alignItems: "center",
+  },
+  dangerButtonText: { color: "#B3261E", fontWeight: "600", fontSize: 13 },
+  backButton: {
+    marginTop: 8,
+    paddingVertical: 14,
+    alignItems: "center",
+  },
+  backButtonText: { color: "#4A7DFF", fontWeight: "600" },
+});

@@ -93,7 +93,10 @@ export default function ChatScreen() {
   // 1つの返答の読み上げ中に音声エラーが何度も起きても、バナー表示は1回に留める
   // (文ごとにエラーが出るとバナーが何度も出たり消えたりしてうるさいため)。
   const voiceErrorShownRef = useRef(false);
-  const handleVoiceError = useCallback(() => {
+  const handleVoiceError = useCallback((error?: unknown) => {
+    // 詳細は設定画面の「この声を試聴する」で確認できるため、ここではconsole.warnに留め、
+    // チャット画面のバナーは簡潔な案内のままにする。
+    if (error) console.warn("音声の再生に失敗しました", error);
     if (voiceErrorShownRef.current) return;
     voiceErrorShownRef.current = true;
     setErrorBanner((prev) =>
