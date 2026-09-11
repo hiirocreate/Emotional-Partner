@@ -1,15 +1,35 @@
-import { Pressable, StyleSheet, Text, View } from "react-native";
+import { useState } from "react";
+import { ActivityIndicator, Pressable, StyleSheet, Text, View } from "react-native";
 import { ChatMessage } from "../lib/types";
+
+interface SpeakCallbacks {
+  onDone?: () => void;
+  onError?: (error?: unknown) => void;
+}
 
 interface Props {
   message: ChatMessage;
-  onSpeak?: (text: string) => void;
+  onSpeak?: (text: string, callbacks?: SpeakCallbacks) => void;
   /** テーマのアクセントカラー。指定時はユーザー側の吹き出し色をこれで上書きする */
   accentColor?: string;
 }
 
 export function ChatBubble({ message, onSpeak, accentColor }: Props) {
   const isUser = message.role === "user";
+  // 🔊ボタンを押してから実際に音が出るまで(合成・接続待ちなどで)数秒かかることがあり、
+  // 何も表示しないと「押せているのかわからない」と感じられるため、押した瞬間から
+  // 再生開始/失敗までの間はローディング表示に切り替える。
+  const [isSpeaking, setIsSpeaking] = useState(false);
+
+  const handleSpeak = () => {
+    if (!onSpeak || isSpeaking) return;
+    setIsSpeaking(true);
+    onSpeak(message.text, {
+      onDone: () => setIsSpeaking(false),
+      onError: () => setIsSpeaking(false),
+    });
+  };
+
   return (
     <View
       style={[
@@ -32,8 +52,22 @@ export function ChatBubble({ message, onSpeak, accentColor }: Props) {
             {message.inputMode === "voice" ? "🎤 音声" : "⌨️ テキスト"}
           </Text>
           {!isUser && onSpeak ? (
-            <Pressable onPress={() => onSpeak(message.text)} hitSlop={8}>
-              <Text style={styles.speakIcon}>🔊</Text>
+            <Pressable
+              onPress={handleSpeak}
+              disabled={isSpeaking}
+              hitSlop={8}
+              style={({ pressed }) => [
+                styles.speakButton,
+                pressed && !isSpeaking && styles.speakButtonPressed,
+              ]}
+            >
+              {isSpeaking ? (
+                <View style={styles.speakSpinner}>
+                  <ActivityIndicator size="small" color="#9A9AB0" />
+                </View>
+              ) : (
+                <Text style={styles.speakIcon}>🔊</Text>
+              )}
             </Pressable>
           ) : null}
         </View>
@@ -74,4 +108,8 @@ const styles = StyleSheet.create({
   userMeta: { color: "#E4EBFF", fontSize: 10 },
   aiMeta: { color: "#9A9AB0", fontSize: 10 },
   speakIcon: { fontSize: 12 },
+  speakButton: { padding: 3, borderRadius: 8 },
+  // 押した瞬間に押されたことがわかるよう、押下中は薄くする
+  speakButtonPressed: { opacity: 0.5, backgroundColor: "#E4E4EE" },
+  speakSpinner: { width: 12, height: 12, transform: [{ scale: 0.7 }] },
 });
