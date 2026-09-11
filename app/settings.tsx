@@ -117,6 +117,29 @@ const OPENROUTER_PRESET = CUSTOM_AI_PROVIDER_PRESETS[2]; // "OpenRouter (無料�
  * Web版では window.alert / window.confirm にフォールバックする。
  * (ネイティブ版では従来どおり Alert.alert を使う)
  */
+/**
+ * 音声再生の失敗理由(unknown)から、可能な範囲で人間が読める文字列を取り出す。
+ * 例外オブジェクト(Error.message)、ネイティブモジュールのエラー(codeやmessage
+ * プロパティを持つオブジェクト)、Web SpeechSynthesisErrorEvent(errorプロパティ)
+ * など、形が定まらないため緩く扱う。何も取り出せない場合はnullを返す。
+ */
+function describeVoiceError(error: unknown): string | null {
+  if (!error) return null;
+  if (error instanceof Error) return error.message;
+  if (typeof error === "string") return error;
+  if (typeof error === "object") {
+    const anyErr = error as Record<string, unknown>;
+    const message = anyErr.message ?? anyErr.error ?? anyErr.code;
+    if (typeof message === "string" && message.trim()) return message;
+  }
+  try {
+    const text = JSON.stringify(error);
+    return text && text !== "{}" ? text : null;
+  } catch {
+    return null;
+  }
+}
+
 function showAlert(title: string, message?: string) {
   if (Platform.OS === "web") {
     if (typeof window !== "undefined" && typeof window.alert === "function") {
@@ -661,17 +684,18 @@ export default function SettingsScreen() {
         ? { ...settings.voice, provider: "system" as const }
         : settings.voice;
     speakText("こんにちは。この声でお話しします。", voiceToUse, {
-      onError: () =>
-        showAlert(
-          "再生できませんでした",
+      onError: (error) => {
+        const base =
           settings.voice.provider === "voicevox"
             ? "VOICEVOXエンジンへの接続、または話者選択を確認してください。"
             : settings.voice.provider === "google"
             ? "Google Cloud TTSのAPIキー、または音声選択を確認してください。"
             : settings.voice.provider === "voicevox_local"
             ? "内蔵VOICEVOXの声の選択、またはダウンロード状況を確認してください。"
-            : "この端末で利用できる音声が見つかりませんでした。"
-        ),
+            : "この端末で利用できる音声が見つかりませんでした。";
+        const detail = describeVoiceError(error);
+        showAlert("再生できませんでした", detail ? `${base}\n\n詳細: ${detail}` : base);
+      },
     });
   };
 
