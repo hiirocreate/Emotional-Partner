@@ -157,6 +157,29 @@ async function ensureVoiceReady(vvmFileName: string): Promise<void> {
   }
 }
 
+/**
+ * 選択中の声を事前に初期化しておく(エンジン初期化 + VVM読み込み)。
+ * 「試聴」ボタンや実際の読み上げが必要になったタイミングで初めて
+ * initializeEngine/loadVoiceModelを呼ぶと、その1回分の待ち時間
+ * (辞書展開・ONNX Runtime初期化・声データの読み込み)がそのまま
+ * ボタンを押してからの「数秒のタイムラグ」として利用者に見えてしまう。
+ * チャット画面を開いた時点など、実際に読み上げが必要になる前に
+ * 呼んでおくことで、この待ち時間を体感しにくくする
+ * (warmUpVoicevoxServerの内蔵VOICEVOX版)。失敗しても投げない
+ * (呼び出し側は無視してよく、実際の読み上げ時には通常のエラー処理に任せる)。
+ */
+export async function warmUpLocalVoicevox(styleId: number): Promise<void> {
+  if (!isLocalVoicevoxSupported()) return;
+  const found = findCatalogEntryByStyleId(styleId);
+  if (!found) return;
+  try {
+    await ensureVoiceReady(found.entry.vvmFile);
+  } catch {
+    // 事前ロードの失敗は無視する(ダウンロード未完了などが理由になりうるが、
+    // 実際に読み上げが呼ばれた際に通常のエラー処理・エラー表示に任せればよい)
+  }
+}
+
 /** テキストとスタイルIDから、端末内で直接WAVを合成する(サーバー通信なし)。 */
 export async function synthesizeLocal(
   text: string,
