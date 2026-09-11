@@ -15,11 +15,12 @@ export function VoiceButton({ isListening, disabled, onPress, idleColor }: Props
     <Pressable
       onPress={onPress}
       disabled={disabled}
-      style={[
+      style={({ pressed }) => [
         styles.button,
         isListening ? styles.listening : styles.idle,
         !isListening && idleColor ? { backgroundColor: idleColor } : null,
         disabled ? styles.disabled : null,
+        pressed && !disabled ? styles.pressed : null,
       ]}
     >
       <Ionicons name={isListening ? "stop" : "mic"} size={22} color="#fff" />
@@ -38,4 +39,6 @@ const styles = StyleSheet.create({
   idle: { backgroundColor: "#4A7DFF" },
   listening: { backgroundColor: "#FF5A5F" },
   disabled: { opacity: 0.4 },
+  // 押した瞬間に押されたことがわかるよう、押下中は薄くする
+  pressed: { opacity: 0.65 },
 });
