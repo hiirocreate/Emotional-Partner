@@ -185,7 +185,13 @@ export async function listGoogleTtsVoices(apiKey: string): Promise<VoiceOption[]
 
 export interface SpeakCallbacks {
   onDone?: () => void;
-  onError?: () => void;
+  /**
+   * 失敗の詳細(捕捉した例外やネイティブ側のエラー)を可能な範囲で渡す。
+   * これまではエラー原因が呼び出し元に一切伝わらず、利用者にもconsole.warnの
+   * 内容(通常は見えない)にしか残らない汎用メッセージしか出せなかったため、
+   * 原因の切り分けができなかった。呼び出し側は無視しても構わない。
+   */
+  onError?: (error?: unknown) => void;
 }
 
 /** ネットワーク通信(VOICEVOXサーバー/Google Cloud TTS)、またはAndroid内蔵VOICEVOXでの非同期合成が必要か */
@@ -212,27 +218,42 @@ function dispatchSpeak(text: string, voice: VoiceSettings, callbacks: SpeakCallb
   if (needsAsyncSynthesis(voice)) {
     // stopSpeaking()で打ち切られていないかを後から判定できるよう、開始時点の世代を覚えておく
     const generation = queueGeneration;
-    const synthesis = synthesizeAsyncAudio(text, voice).catch((e) => {
-      console.warn("読み上げに失敗しました", e);
-      return null;
-    });
-    raceWithTimeout(synthesis, CLOUD_SYNTHESIS_TIMEOUT_MS).then((result) => {
+    const synthesis = synthesizeWithCapture(text, voice);
+    raceWithTimeout(synthesis, synthesisTimeoutFor(voice)).then((result) => {
       if (generation !== queueGeneration) return; // 待っている間にstopSpeaking()で打ち切られた
       if (result === TIMED_OUT) {
         // 「音声が出ない」体感を避けるため、遅い合成を待たずに端末内蔵ボイスで即座に読み上げる
         speakWithSystemVoice(text, voice.selectedVoiceId, voice.rate, voice.pitch, callbacks);
         return;
       }
-      if (!result) {
-        callbacks.onError?.();
+      if (!result.ok) {
+        callbacks.onError?.(result.error);
         return;
       }
-      playAudioArrayBuffer(result.arrayBuffer, result.mimeType, result.fileExt, callbacks);
+      playAudioArrayBuffer(result.audio.arrayBuffer, result.audio.mimeType, result.audio.fileExt, callbacks);
     });
     return;
   }
 
   speakWithSystemVoice(text, voice.selectedVoiceId, voice.rate, voice.pitch, callbacks);
+}
+
+/**
+ * 合成失敗時に例外を握りつぶさず、呼び出し元へ理由を渡せる形で結果を返す。
+ * 以前は `.catch(() => null)` で失敗をnullに潰していたため、UI側でエラー原因を
+ * 一切表示できなかった(原因の切り分けができない、というユーザー報告のバグの根本要因)。
+ */
+type SynthesisOutcome =
+  | { ok: true; audio: SynthesizedAudio }
+  | { ok: false; error: unknown };
+
+function synthesizeWithCapture(text: string, voice: VoiceSettings): Promise<SynthesisOutcome> {
+  return synthesizeAsyncAudio(text, voice)
+    .then((audio): SynthesisOutcome => ({ ok: true, audio }))
+    .catch((error): SynthesisOutcome => {
+      console.warn("読み上げに失敗しました", error);
+      return { ok: false, error };
+    });
 }
 
 interface SynthesizedAudio {
@@ -248,6 +269,19 @@ interface SynthesizedAudio {
  * スリープから起きる場合などを想定した値(通常の応答はこれよりずっと速い)。
  */
 const CLOUD_SYNTHESIS_TIMEOUT_MS = 4000;
+
+/**
+ * 内蔵VOICEVOX(voicevox_local)は初回のみ、エンジン初期化(OpenJTalk辞書読み込み・
+ * ONNXモデル初期化)や声データ(VVM)の読み込みが走るため、ネットワーク合成より
+ * 数秒〜十数秒ほど長くかかることがある。ネットワーク用の短いタイムアウトで
+ * 打ち切ってしまうと、せっかくの内蔵音声機能が意味をなさず毎回タイムアウト
+ * フォールバックしてしまうため、内蔵VOICEVOXだけは長めの猶予を持たせる。
+ */
+const LOCAL_SYNTHESIS_TIMEOUT_MS = 15000;
+
+function synthesisTimeoutFor(voice: VoiceSettings): number {
+  return voice.provider === "voicevox_local" ? LOCAL_SYNTHESIS_TIMEOUT_MS : CLOUD_SYNTHESIS_TIMEOUT_MS;
+}
 
 const TIMED_OUT = Symbol("timed-out");
 
@@ -266,8 +300,8 @@ interface QueueItem {
   text: string;
   voice: VoiceSettings;
   callbacks: SpeakCallbacks;
-  /** クラウド合成が必要な場合、キュー追加と同時に開始しておく先読みリクエスト(失敗時はnullに解決する) */
-  synthesis: Promise<SynthesizedAudio | null> | null;
+  /** クラウド合成が必要な場合、キュー追加と同時に開始しておく先読みリクエスト */
+  synthesis: Promise<SynthesisOutcome> | null;
 }
 
 let speechQueue: QueueItem[] = [];
@@ -298,12 +332,7 @@ export function enqueueSpeech(
   callbacks: SpeakCallbacks = {}
 ): void {
   if (!text.trim()) return;
-  const synthesis = needsAsyncSynthesis(voice)
-    ? synthesizeAsyncAudio(text, voice).catch((e) => {
-        console.warn("音声合成の先読みに失敗しました", e);
-        return null;
-      })
-    : null;
+  const synthesis = needsAsyncSynthesis(voice) ? synthesizeWithCapture(text, voice) : null;
   speechQueue.push({ text, voice, callbacks, synthesis });
   if (!isProcessingQueue) {
     processSpeechQueue(queueGeneration);
@@ -324,9 +353,9 @@ async function processSpeechQueue(generation: number): Promise<void> {
   isProcessingQueue = true;
 
   if (item.synthesis) {
-    const audio = await raceWithTimeout(item.synthesis, CLOUD_SYNTHESIS_TIMEOUT_MS);
+    const result = await raceWithTimeout(item.synthesis, synthesisTimeoutFor(item.voice));
     if (generation !== queueGeneration) return; // 待っている間にstopSpeaking()で打ち切られた
-    if (audio === TIMED_OUT) {
+    if (result === TIMED_OUT) {
       // 「音声が出ない」体感を避けるため、遅い合成を待たずに端末内蔵ボイスで即座に読み上げる
       // (先読みリクエスト自体はそのまま裏で進めておき、結果は使わずに捨てる)
       await new Promise<void>((resolve) => {
@@ -335,16 +364,21 @@ async function processSpeechQueue(generation: number): Promise<void> {
             item.callbacks.onDone?.();
             resolve();
           },
-          onError: () => {
-            item.callbacks.onError?.();
+          onError: (e) => {
+            item.callbacks.onError?.(e);
             resolve();
           },
         });
       });
-    } else if (!audio) {
-      item.callbacks.onError?.();
+    } else if (!result.ok) {
+      item.callbacks.onError?.(result.error);
     } else {
-      await playAudioArrayBuffer(audio.arrayBuffer, audio.mimeType, audio.fileExt, item.callbacks);
+      await playAudioArrayBuffer(
+        result.audio.arrayBuffer,
+        result.audio.mimeType,
+        result.audio.fileExt,
+        item.callbacks
+      );
     }
   } else {
     await new Promise<void>((resolve) => {
@@ -353,8 +387,8 @@ async function processSpeechQueue(generation: number): Promise<void> {
           item.callbacks.onDone?.();
           resolve();
         },
-        onError: () => {
-          item.callbacks.onError?.();
+        onError: (e) => {
+          item.callbacks.onError?.(e);
           resolve();
         },
       });
@@ -414,7 +448,7 @@ function speakWithSystemVoice(
 ) {
   if (isWeb()) {
     if (typeof window === "undefined" || !("speechSynthesis" in window)) {
-      callbacks.onError?.();
+      callbacks.onError?.(new Error("この端末/ブラウザでは音声合成(SpeechSynthesis)が利用できません"));
       return;
     }
     const utter = new window.SpeechSynthesisUtterance(text);
@@ -425,7 +459,7 @@ function speakWithSystemVoice(
       if (match) utter.voice = match;
     }
     utter.onend = () => callbacks.onDone?.();
-    utter.onerror = () => callbacks.onError?.();
+    utter.onerror = (event) => callbacks.onError?.(event);
     window.speechSynthesis.speak(utter);
     return;
   }
@@ -603,7 +637,7 @@ async function playAudioArrayBuffer(
     // 途中で打ち切られた場合は、stopSpeaking()側で完結しているのでコールバックは呼ばない
   } catch (e) {
     console.warn("音声の再生に失敗しました", e);
-    callbacks.onError?.();
+    callbacks.onError?.(e);
   }
 }
 
